@@ -13,7 +13,6 @@ class CameraCalibrator:
     - Identify rotation center point
     - Store calibration parameters
     
-    YOUR IMPLEMENTATION NEEDED
     """
     
     def __init__(self):

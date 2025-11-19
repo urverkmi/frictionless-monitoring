@@ -15,7 +15,6 @@ class KinematicsCalculator:
     - Create complete FrameData objects
     - Store FrameData for streaming
     
-    TEAMMATE IMPLEMENTATION NEEDED
     """
     
     def __init__(self, memory_manager: MemoryManager):

@@ -13,7 +13,6 @@ class MemoryManager:
     - Manage memory efficiently (auto-cleanup old data)
     - Thread-safe operations
     
-    TEAMMATE IMPLEMENTATION NEEDED
     """
     
     def __init__(self, buffer_size: int = 100):
