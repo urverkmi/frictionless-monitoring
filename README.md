@@ -10,6 +10,7 @@ Real-time monitoring system for plasma brake test rig end mass tracking.
 
 ## Hardware Requirements
 - Raspberry Pi 5 (8GB)
+- Raspberry Pi High Quality Camera
 
 ## Setup
 ```
