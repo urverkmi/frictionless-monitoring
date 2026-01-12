@@ -16,6 +16,8 @@ env/
 .DS_Store
 Thumbs.db
 
+
+# GUI
 gui/node_modules/
 gui/build/
 
