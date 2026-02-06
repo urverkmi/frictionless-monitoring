@@ -1,3 +1,4 @@
+import math
 from memory import MemoryManager
 from typing import Optional, Tuple, List
 from data_structures import FrameData, Vector2D
@@ -47,7 +48,19 @@ class KinematicsCalculator:
         - Return Vector2D(dx/dt, dy/dt)
         - Handle dt = 0 case
         """
-        pass
+        # Positions come from MemoryManager as Vector2D instances
+        pos_cur = current_pos["position"]
+        pos_prev = previous_pos["position"]
+        # Use frame timestamps for proper physical units
+        t_cur = current_pos["timestamp"]
+        t_prev = previous_pos["timestamp"]
+        dt = t_cur - t_prev
+        # Guard against duplicate / out‑of‑order timestamps
+        if dt <= 0:
+            return Vector2D(0.0, 0.0)
+        dx = pos_cur.x - pos_prev.x
+        dy = pos_cur.y - pos_prev.y
+        return Vector2D(dx / dt, dy / dt)
     
     def calculate_acceleration(self, current_vel: Vector2D, 
                               previous_vel: Vector2D,
@@ -67,7 +80,12 @@ class KinematicsCalculator:
         - Calculate dvx = vx1 - vx0, dvy = vy1 - vy0
         - Return Vector2D(dvx/dt, dvy/dt)
         """
-        pass
+        # Do not divide by zero or negative time deltas
+        if dt <= 0:
+            return Vector2D(0.0, 0.0)
+        dvx = current_vel.x - previous_vel.x
+        dvy = current_vel.y - previous_vel.y
+        return Vector2D(dvx / dt, dvy / dt)
     
     def calculate_angular_velocity(self, current_angle: float,
                                    previous_angle: float,
@@ -88,7 +106,13 @@ class KinematicsCalculator:
         - Handle wraparound at 2π (shortest path)
         - Return dθ/dt
         """
-        pass
+        # No time elapsed → no angular motion defined
+        if dt <= 0:
+            return 0.0
+        dtheta = current_angle - previous_angle
+        # Wraparound: shortest path in [-π, π]
+        dtheta = (dtheta + math.pi) % (2 * math.pi) - math.pi
+        return dtheta / dt
     
     def calculate_angular_acceleration(self, current_omega: float,
                                        previous_omega: float,
@@ -106,7 +130,9 @@ class KinematicsCalculator:
             
         TODO: Implement angular acceleration
         """
-        pass
+        if dt <= 0:
+            return 0.0
+        return (current_omega - previous_omega) / dt
     
     def process_frame(self) -> Optional[FrameData]:
         """
@@ -131,7 +157,59 @@ class KinematicsCalculator:
         - Option B: Immediately pass to DataStreamer for transmission
         - Option C: Both - store locally AND stream
         """
-        pass
+        # Most recent N position measurements from MemoryManager
+        positions = self.memory_manager.get_recent_positions(n=3)
+        if len(positions) < 2:
+            return None
+
+        # Buffer is ordered newest first:
+        # positions[0] = current, positions[1] = previous, positions[2] = older
+        current_pos = positions[0]
+        previous_pos = positions[1]
+        dt_vel = current_pos["timestamp"] - previous_pos["timestamp"]
+        if dt_vel <= 0:
+            return None
+
+        velocity = self.calculate_velocity(current_pos, previous_pos)
+        angular_velocity = self.calculate_angular_velocity(
+            current_pos["angular_position"],
+            previous_pos["angular_position"],
+            dt_vel,
+        )
+
+        acceleration = Vector2D(0.0, 0.0)
+        angular_acceleration = 0.0
+        if len(positions) >= 3:
+            older_pos = positions[2]
+            dt_prev = previous_pos["timestamp"] - older_pos["timestamp"]
+            if dt_prev > 0:
+                previous_vel = self.calculate_velocity(previous_pos, older_pos)
+                acceleration = self.calculate_acceleration(
+                    velocity, previous_vel, (dt_vel + dt_prev) / 2.0
+                )
+                prev_angular = self.calculate_angular_velocity(
+                    previous_pos["angular_position"],
+                    older_pos["angular_position"],
+                    dt_prev,
+                )
+                angular_acceleration = self.calculate_angular_acceleration(
+                    angular_velocity, prev_angular, (dt_vel + dt_prev) / 2.0
+                )
+
+        frame_data = FrameData(
+            timestamp=current_pos["timestamp"],
+            frame_id=current_pos["frame_id"],
+            position=current_pos["position"],
+            velocity=velocity,
+            acceleration=acceleration,
+            angular_position=current_pos["angular_position"],
+            angular_velocity=angular_velocity,
+            angular_acceleration=angular_acceleration,
+            tracking_confidence=current_pos.get("tracking_confidence", 1.0),
+            detection_quality=current_pos.get("detection_quality"),
+        )
+        self.frame_data_buffer.append(frame_data)
+        return frame_data
     
     def get_latest_frame_data(self) -> Optional[FrameData]:
         """
@@ -142,8 +220,10 @@ class KinematicsCalculator:
             
         TODO: Implement retrieval from buffer
         """
-        pass
-    
+        if not self.frame_data_buffer:
+            return None
+        return self.frame_data_buffer[-1]
+
     def get_frame_data_buffer(self) -> List[FrameData]:
         """
         Get all stored FrameData objects.
@@ -153,12 +233,12 @@ class KinematicsCalculator:
             
         TODO: Return current buffer contents
         """
-        pass
-    
+        return list(self.frame_data_buffer)
+
     def clear_buffer(self):
         """
         Clear FrameData buffer.
         
         TODO: Implement buffer clearing
         """
-        pass
+        self.frame_data_buffer.clear()

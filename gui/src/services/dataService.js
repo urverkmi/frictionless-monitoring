@@ -1,5 +1,7 @@
 // Configuration
+// DATA_PORT must match the WebSocket server in Python (e.g. FakeDataStream.py)
 const DATA_PORT = 8080;
+// When false, connect to real WebSocket stream instead of local mock generator
 const USE_MOCK_DATA = true; // Set to false when real data is available
 
 // Physical constants
@@ -16,6 +18,7 @@ let startTime = Date.now();
 let currentAngle = 0;
 
 // Smooth mock data generator
+// Shape of returned object must match what the GUI expects from the Python stream
 function generateMockData() {
   const elapsed = (Date.now() - startTime) / 1000;
   const dt = 0.05; // 50ms time step
@@ -63,7 +66,7 @@ function generateMockData() {
 function connectWebSocket() {
   if (statusCallback) statusCallback('connecting');
   
-  ws = new WebSocket(`ws://localhost:${DATA_PORT}`);
+ws = new WebSocket(`ws://localhost:${DATA_PORT}`);
   
   ws.onopen = () => {
     console.log('Connected to data stream');
