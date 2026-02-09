@@ -2,7 +2,7 @@
 // DATA_PORT must match the WebSocket server in Python (e.g. FakeDataStream.py)
 const DATA_PORT = 8080;
 // When false, connect to real WebSocket stream instead of local mock generator
-const USE_MOCK_DATA = true; // Set to false when real data is available
+const USE_MOCK_DATA = false; // Set to false when real data is available
 
 // Physical constants
 const TETHER_LENGTH = 150; // pixels (or meters in real data)

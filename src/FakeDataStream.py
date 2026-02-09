@@ -38,7 +38,6 @@ FRAME_INTERVAL = 1.0 / FPS
 # Simulated geometry (satellite fixed, end mass moves around it)
 SATELLITE_X = 100.0
 SATELLITE_Y = 100.0
-# End mass: start (150,150), move to (160,160), back to (150,150) over a few frames
 TETHER_LENGTH = 150
 MAIN_SIZE = 20
 END_MASS_RADIUS = 12
@@ -47,12 +46,14 @@ END_MASS_RADIUS = 12
 def make_end_mass_position(frame_id: int) -> tuple:
     """Simple toy trajectory for the end mass.
 
-    Adjust this if you want different fake motion.
+    Circular motion around satellite so angular velocity is non-zero.
     """
-    step = frame_id % 4
-    if step == 0 or step >= 2:
-        return (150.0, 150.0)
-    return (160.0, 160.0)
+    # Rotate around satellite at ~0.5 rad/s (one full rotation in ~12 seconds)
+    angle = (frame_id / FPS) * 0.5  # radians
+    radius = 50.0  # distance from satellite
+    ex = SATELLITE_X + radius * math.cos(angle)
+    ey = SATELLITE_Y + radius * math.sin(angle)
+    return (ex, ey)
 
 
 def angle_from_center(sat_x: float, sat_y: float, ex: float, ey: float) -> float:
@@ -97,7 +98,7 @@ async def stream_loop(websocket):
     while True:
         t0 = time.perf_counter()
         timestamp = time.time()
-        # 1) Generate fake end‑mass position for this frame
+        # 1) Generate fake end-mass position for this frame
         ex, ey = make_end_mass_position(frame_id)
         frame_id += 1
 
@@ -130,9 +131,9 @@ async def stream_loop(websocket):
             await asyncio.sleep(sleep_time)
 
 
-async def handler(websocket, path):
+async def handler(websocket):
     """Handle one client: run stream until disconnect."""
-    print(f"Client connected from {websocket.remote_address}")
+    print(f"Client connected")
     try:
         await stream_loop(websocket)
     except Exception as e:
