@@ -25,8 +25,7 @@ class MemoryManager:
         """
         self.buffer_size = buffer_size
         self.position_buffer: deque = deque(maxlen=buffer_size)
-        pass
-    
+
     def store_position_data(self, position_data: dict):
         """
         Store position data from PositionDetector.
@@ -41,8 +40,10 @@ class MemoryManager:
         - Consider thread safety if needed (threading.Lock)
         - Validate data before storing
         """
-        pass
-    
+        if not position_data:
+            return
+        self.position_buffer.append(position_data)
+
     def get_recent_positions(self, n: int = 2) -> List[dict]:
         """
         Get the N most recent position measurements.
@@ -57,7 +58,11 @@ class MemoryManager:
         - Return last N items from buffer
         - Handle case where buffer has fewer than N items
         """
-        pass
+        if n <= 0 or not self.position_buffer:
+            return []
+        buf = list(self.position_buffer)
+        k = min(n, len(buf))
+        return list(reversed(buf[-k:]))
     
     def get_position_at_time(self, target_time: float) -> Optional[dict]:
         """
@@ -79,8 +84,8 @@ class MemoryManager:
         
         TODO: Implement buffer clearing
         """
-        pass
-    
+        self.position_buffer.clear()
+
     def get_buffer_info(self) -> dict:
         """
         Get information about current buffer state.
@@ -96,4 +101,17 @@ class MemoryManager:
             
         TODO: Implement buffer info
         """
-        pass
+        if not self.position_buffer:
+            return {
+                "size": 0,
+                "capacity": self.buffer_size,
+                "oldest_timestamp": None,
+                "newest_timestamp": None,
+            }
+        buf = list(self.position_buffer)
+        return {
+            "size": len(buf),
+            "capacity": self.buffer_size,
+            "oldest_timestamp": buf[0].get("timestamp"),
+            "newest_timestamp": buf[-1].get("timestamp"),
+        }
