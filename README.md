@@ -22,3 +22,4 @@ See [docs/api.md](docs/api.md) for complete data structure specification.
 
 ## GUI
 local development: cd gui, npm install, npm start
+to run: ./start.sh from root
