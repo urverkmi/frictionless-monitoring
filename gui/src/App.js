@@ -1,13 +1,26 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import MainDisplay from './components/MainDisplay';
 import DataPanel from './components/DataPanel';
-import { connectToDataStream, disconnectFromDataStream } from './services/dataService';
+import ControlPanel from './components/ControlPanel';
 
-// Configuration constants
+import { connectToDataStream, disconnectFromDataStream } from './services/dataService';
+import { sendStart, sendStop } from './services/controlService';
+
+/**
+ * How the full signal chain works end-to-end:
+ * User clicks START in React
+ *     → onStart() in App.js
+ *         → sendStart() in controlService.js
+ *             → POST http://pi.local:5000/cmd/start  (HTTP over WiFi/Ethernet)
+ *                 → Flask sets MODE_STANDBY, then MODE_EARLY_DEPLOYMENT
+ *                     → build_packet() constructs RS422 binary frame
+ *                         → serial.Serial writes to /dev/ttyUSB0
+ *                             → RS422 signal hits the PCB
+ **/
+
 const TETHER_LENGTH = 150;
 const MAIN_SIZE = 20;
 const END_MASS_RADIUS = 12;
-const ROTATION_SPEED = 0.3;
 
 function App() {
   const [data, setData] = useState({
@@ -22,23 +35,36 @@ function App() {
   });
 
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
+  const [controlStatus, setControlStatus] = useState('idle');
 
   useEffect(() => {
-    // Connect to data stream
-    const handleData = (newData) => {
-      setData(newData);
-    };
-
-    const handleConnectionChange = (status) => {
-      setConnectionStatus(status);
-    };
+    const handleData = (newData) => setData(newData);
+    const handleConnectionChange = (status) => setConnectionStatus(status);
 
     connectToDataStream(handleData, handleConnectionChange);
 
-    return () => {
-      disconnectFromDataStream();
-    };
+    return () => disconnectFromDataStream();
   }, []);
+
+  const handleStart = async () => {
+    try {
+      await sendStart();
+      setControlStatus('running');
+    } catch (err) {
+      console.error(err);
+      setControlStatus('error');
+    }
+  };
+
+  const handleStop = async () => {
+    try {
+      await sendStop();
+      setControlStatus('stopped');
+    } catch (err) {
+      console.error(err);
+      setControlStatus('error');
+    }
+  };
 
   return (
     <div style={{
@@ -49,6 +75,12 @@ function App() {
     }}>
       <MainDisplay data={data} />
       <DataPanel data={data} connectionStatus={connectionStatus} />
+
+      <ControlPanel
+        onStart={handleStart}
+        onStop={handleStop}
+        status={controlStatus}
+      />
     </div>
   );
 }
