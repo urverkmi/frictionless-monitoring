@@ -144,7 +144,7 @@ async def handler(websocket):
 
 async def run_server():
     import websockets
-    async with websockets.serve(handler, "localhost", DATA_PORT):
+    async with websockets.serve(handler, "0.0.0.0", DATA_PORT):
         await asyncio.Future()  # run forever
 
 
@@ -155,7 +155,7 @@ def main():
         print("Install websockets: pip install websockets")
         sys.exit(1)
 
-    print(f"Fake data stream starting on ws://localhost:{DATA_PORT} at {FPS} fps")
+    print(f"Fake data stream starting on ws://0.0.0.0:{DATA_PORT} at {FPS} fps")
     print("In gui set USE_MOCK_DATA = false to connect to this stream.")
     asyncio.run(run_server())
 

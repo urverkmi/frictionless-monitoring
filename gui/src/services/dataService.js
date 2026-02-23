@@ -66,7 +66,7 @@ function generateMockData() {
 function connectWebSocket() {
   if (statusCallback) statusCallback('connecting');
   
-ws = new WebSocket(`ws://localhost:${DATA_PORT}`);
+ws = new WebSocket(`ws://${window.location.hostname}:${DATA_PORT}`);
   
   ws.onopen = () => {
     console.log('Connected to data stream');

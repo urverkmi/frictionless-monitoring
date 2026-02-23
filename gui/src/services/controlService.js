@@ -1,4 +1,4 @@
-const BASE_URL = 'http://localhost:5000';
+const BASE_URL = `http://${window.location.hostname}:5000`;
 
 export async function sendStart() {
   const response = await fetch(`${BASE_URL}/cmd/start`, { method: 'POST' });

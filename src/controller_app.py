@@ -13,7 +13,8 @@ from flask import Flask, render_template_string, jsonify
 from flask_cors import CORS
 
 
-SERIAL_PORT = "/dev/ttyUSB0"   # Check with: ls /dev/ttyUSB*
+SERIAL_PORT = "/tmp/ttyVIRT0"    # Simulator mode
+# SERIAL_PORT = "/dev/ttyUSB0"   # Check with: ls /dev/ttyUSB*
 BAUD_RATE   = 115200
 TIMEOUT_S   = 1.0
 
