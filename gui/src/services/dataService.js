@@ -34,23 +34,23 @@ function generateMockData() {
   const time = elapsed;
   const linearSpeed = {
     x: Math.sin(time * 0.3) * 1.5,
-    y: Math.cos(time * 0.25) * 1.2,
-    z: Math.sin(time * 0.35) * 0.8
+    y: Math.cos(time * 0.25) * 1.2
   };
   
   const angularSpeed = {
     x: Math.sin(time * 0.2) * 0.5,
-    y: Math.cos(time * 0.15) * 0.4,
-    z: ROTATION_SPEED // constant rotation around Z axis
+    y: Math.cos(time * 0.15) * 0.4
   };
 
   return {
     linearSpeed,
     angularSpeed,
-    mainPosition: {
+    satellitePosition: {
       x: 0,
       y: 0
     },
+    // Keep legacy field for compatibility with older payload consumers.
+    mainPosition: { x: 0, y: 0 },
     endMassPosition: {
       x: endMassX,
       y: endMassY

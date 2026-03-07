@@ -6,6 +6,7 @@ function MainDisplay({ data }) {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    const satellitePosition = data.satellitePosition || data.mainPosition;
 
     const ctx = canvas.getContext('2d');
     const width = canvas.width;
@@ -50,7 +51,7 @@ function MainDisplay({ data }) {
     ctx.strokeStyle = '#64748b';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(data.mainPosition.x, data.mainPosition.y);
+    ctx.moveTo(satellitePosition.x, satellitePosition.y);
     ctx.lineTo(data.endMassPosition.x, data.endMassPosition.y);
     ctx.stroke();
 
@@ -60,14 +61,14 @@ function MainDisplay({ data }) {
     ctx.strokeStyle = '#60a5fa';
     ctx.lineWidth = 2;
     ctx.fillRect(
-      data.mainPosition.x - halfSize,
-      data.mainPosition.y - halfSize,
+      satellitePosition.x - halfSize,
+      satellitePosition.y - halfSize,
       data.mainSize,
       data.mainSize
     );
     ctx.strokeRect(
-      data.mainPosition.x - halfSize,
-      data.mainPosition.y - halfSize,
+      satellitePosition.x - halfSize,
+      satellitePosition.y - halfSize,
       data.mainSize,
       data.mainSize
     );
@@ -75,7 +76,7 @@ function MainDisplay({ data }) {
     // Draw center point
     ctx.fillStyle = '#1e293b';
     ctx.beginPath();
-    ctx.arc(data.mainPosition.x, data.mainPosition.y, 3, 0, Math.PI * 2);
+    ctx.arc(satellitePosition.x, satellitePosition.y, 3, 0, Math.PI * 2);
     ctx.fill();
 
     // Draw end mass (circle)

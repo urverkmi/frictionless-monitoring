@@ -1,6 +1,8 @@
 import React from 'react';
 
 function DataPanel({ data, connectionStatus }) {
+  const satellitePosition = data.satellitePosition || data.mainPosition;
+
   const VectorDisplay = ({ title, vector, unit }) => (
     <div style={{
       backgroundColor: '#1e293b',
@@ -19,7 +21,7 @@ function DataPanel({ data, connectionStatus }) {
         {title}
       </h3>
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-        {['x', 'y', 'z'].map(axis => (
+        {['x', 'y'].map(axis => (
           <div key={axis} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={{ 
               color: '#64748b', 
@@ -41,10 +43,10 @@ function DataPanel({ data, connectionStatus }) {
               <div 
                 style={{ 
                   height: '100%',
-                  width: `${Math.min(Math.abs(vector[axis]) / 3 * 100, 100)}%`,
+                  width: `${Math.min(Math.abs((vector && vector[axis]) || 0) / 3 * 100, 100)}%`,
                   backgroundColor: '#3b82f6',
                   transition: 'all 0.1s',
-                  marginLeft: vector[axis] < 0 ? 'auto' : '0'
+                  marginLeft: ((vector && vector[axis]) || 0) < 0 ? 'auto' : '0'
                 }}
               />
             </div>
@@ -56,7 +58,7 @@ function DataPanel({ data, connectionStatus }) {
               textAlign: 'right',
               fontFamily: 'monospace'
             }}>
-              {vector[axis].toFixed(3)}
+              {(((vector && vector[axis]) || 0)).toFixed(3)}
               <span style={{ fontSize: '0.875rem', color: '#64748b', marginLeft: '0.25rem' }}>
                 {unit}
               </span>
@@ -77,20 +79,12 @@ function DataPanel({ data, connectionStatus }) {
 
   const linearMag = Math.sqrt(
     data.linearSpeed.x ** 2 + 
-    data.linearSpeed.y ** 2 + 
-    data.linearSpeed.z ** 2
+    data.linearSpeed.y ** 2
   );
   
   const angularMag = Math.sqrt(
     data.angularSpeed.x ** 2 + 
-    data.angularSpeed.y ** 2 + 
-    data.angularSpeed.z ** 2
-  );
-
-  // Calculate distance from main unit to end mass
-  const distance = Math.sqrt(
-    data.endMassPosition.x ** 2 + 
-    data.endMassPosition.y ** 2
+    data.angularSpeed.y ** 2
   );
 
   return (
@@ -127,6 +121,27 @@ function DataPanel({ data, connectionStatus }) {
         }}>
           {new Date(data.timestamp).toLocaleTimeString()}
         </span>
+      </div>
+
+      {/* Satellite and tether info */}
+      <div style={{
+        backgroundColor: '#1e293b',
+        padding: '1rem',
+        borderRadius: '8px',
+        marginBottom: '1rem'
+      }}>
+        <div style={{ fontSize: '0.75rem', color: '#94a3b8', textTransform: 'uppercase', marginBottom: '0.5rem', letterSpacing: '0.05em' }}>
+          Satellite Position
+        </div>
+        <div style={{ fontFamily: 'monospace', marginBottom: '0.5rem' }}>
+          x: {satellitePosition.x.toFixed(2)}, y: {satellitePosition.y.toFixed(2)}
+        </div>
+        <div style={{ fontSize: '0.75rem', color: '#94a3b8', textTransform: 'uppercase', marginBottom: '0.25rem', letterSpacing: '0.05em' }}>
+          Tether Length
+        </div>
+        <div style={{ fontFamily: 'monospace' }}>
+          {data.tetherLength.toFixed(2)}
+        </div>
       </div>
 
       {/* Magnitude Cards */}

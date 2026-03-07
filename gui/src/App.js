@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import MainDisplay from './components/MainDisplay';
 import DataPanel from './components/DataPanel';
 import { connectToDataStream, disconnectFromDataStream } from './services/dataService';
@@ -11,9 +11,9 @@ const ROTATION_SPEED = 0.3;
 
 function App() {
   const [data, setData] = useState({
-    linearSpeed: { x: 0, y: 0, z: 0 },
-    angularSpeed: { x: 0, y: 0, z: 0 },
-    mainPosition: { x: 0, y: 0 },
+    linearSpeed: { x: 0, y: 0 },
+    angularSpeed: { x: 0, y: 0 },
+    satellitePosition: { x: 0, y: 0 },
     endMassPosition: { x: TETHER_LENGTH, y: 0 },
     tetherLength: TETHER_LENGTH,
     mainSize: MAIN_SIZE,

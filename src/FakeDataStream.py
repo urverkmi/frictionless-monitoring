@@ -66,7 +66,12 @@ def angle_from_center(sat_x: float, sat_y: float, ex: float, ey: float) -> float
 def frame_data_to_gui_payload(frame_data, satellite_xy: tuple) -> dict:
     """Convert FrameData + satellite position to the object shape dataService.js expects."""
     sx, sy = satellite_xy
+    # Represent angular speed in x/y components for GUI display requirements.
+    angle = frame_data.angular_position
+    omega = frame_data.angular_velocity
     return {
+        "satellitePosition": {"x": sx, "y": sy},
+        # Keep legacy field for compatibility with older GUI code.
         "mainPosition": {"x": sx, "y": sy},
         "endMassPosition": {
             "x": frame_data.position.x,
@@ -75,12 +80,10 @@ def frame_data_to_gui_payload(frame_data, satellite_xy: tuple) -> dict:
         "linearSpeed": {
             "x": frame_data.velocity.x,
             "y": frame_data.velocity.y,
-            "z": 0,
         },
         "angularSpeed": {
-            "x": 0,
-            "y": 0,
-            "z": frame_data.angular_velocity,
+            "x": omega * math.cos(angle),
+            "y": omega * math.sin(angle),
         },
         "tetherLength": TETHER_LENGTH,
         "mainSize": MAIN_SIZE,
