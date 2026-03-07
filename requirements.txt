@@ -9,3 +9,7 @@ python-socketio>=5.10.0
 # matplotlib>=3.8.0
 # pyqt6>=6.6.0  # or tkinter (built-in)
 websockets>=12.0
+flask
+flask-cors
+pyserial
+crcmod
