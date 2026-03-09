@@ -24,9 +24,9 @@ const END_MASS_RADIUS = 12;
 
 function App() {
   const [data, setData] = useState({
-    linearSpeed: { x: 0, y: 0, z: 0 },
-    angularSpeed: { x: 0, y: 0, z: 0 },
-    mainPosition: { x: 0, y: 0 },
+    linearSpeed: { x: 0, y: 0 },
+    angularSpeed: { x: 0, y: 0 },
+    satellitePosition: { x: 0, y: 0 },
     endMassPosition: { x: TETHER_LENGTH, y: 0 },
     tetherLength: TETHER_LENGTH,
     mainSize: MAIN_SIZE,
