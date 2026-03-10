@@ -4,6 +4,8 @@
 #include <mutex>
 #include <condition_variable>
 #include <memory>
+#include <map>
+#include <vector>
 #include <cmath>
 
 #include <opencv2/opencv.hpp>
@@ -15,297 +17,477 @@
 #include <apriltag/tag36h11.h>
 
 // ============================================================
-// Config
+// CONFIG
 // ============================================================
-constexpr int resoluion_divider = 2; // 1 full res   2 half res...
+
+constexpr int resoluion_divider = 1; // 1 full res   2 half res...
+
 constexpr int LOW_W = 640;
 constexpr int LOW_H = 480;
-constexpr int ROI_PAD = 80;
-constexpr double TAG_SIZE = 0.1552;
+
+constexpr int ROI_PAD = 50;
+
+constexpr double TAG_SIZE = 0.1; //meter 0.1552
+constexpr double SIDE_LENGTH = 0.8;  // calibration tag square
+
+constexpr int TRACK_ID0 = 0;
+constexpr int TRACK_ID1 = 1;
+
+// calibration ids CCW
+constexpr int CAL_ID0 = 2;
+constexpr int CAL_ID1 = 3;
+constexpr int CAL_ID2 = 4;
+constexpr int CAL_ID3 = 5;
 
 // ============================================================
-// Shared data structs
+// WORLD POINTS (CCW)
 // ============================================================
-struct FrameData {
-    std::shared_ptr<cv::Mat> frame;
-    int64_t t_cam_ns;
-};
 
-struct ROIResult {
-    FrameData data;
-    cv::Rect roi;
-    bool valid = false;
-};
-
-struct PoseResult {
-    FrameData data;
-    cv::Vec3d tvec;
-    double yaw = 0;
-    cv::Rect roi;
-    bool valid = false;
-};
-
-// ============================================================
-// Globals (simple & explicit)
-// ============================================================
-std::mutex m_cap, m_low, m_high, m_vis;
-std::condition_variable cv_cap, cv_low, cv_high, cv_vis;
-
-std::shared_ptr<FrameData> cap_frame;
-std::shared_ptr<ROIResult> roi_result;
-std::shared_ptr<PoseResult> pose_result;
-
-std::atomic<bool> running{true};
-
-// ============================================================
-// Imshow helper
-// ============================================================
-void imshowScaled(const std::string& name, const cv::Mat& img,
-                  int maxW = 1600, int maxH = 900)
+std::map<int, cv::Point3f> worldPoints =
 {
+    {2, {-SIDE_LENGTH/2, -SIDE_LENGTH/2, 0}},
+    {3, { SIDE_LENGTH/2, -SIDE_LENGTH/2, 0}},
+    {4, { SIDE_LENGTH/2,  SIDE_LENGTH/2, 0}},
+    {5, {-SIDE_LENGTH/2,  SIDE_LENGTH/2, 0}}
+};
+
+// ============================================================
+// SHARED STRUCTS
+// ============================================================
+
+struct FrameData
+{
+    std::shared_ptr<cv::Mat> frame;
+    int64_t timestamp;
+};
+
+struct Detection
+{
+    int id;
+    std::vector<cv::Point2f> corners;
+};
+
+struct PoseWorld
+{
+    int id;
+    double X;
+    double Y;
+    double yaw;
+};
+
+// ============================================================
+// GLOBALS
+// ============================================================
+
+std::mutex mtxFrame;
+std::condition_variable cvFrame;
+std::shared_ptr<FrameData> sharedFrame;
+
+std::atomic<bool> running(true);
+std::atomic<bool> calibrated(false);
+
+cv::Mat R_wc;
+cv::Mat t_wc;
+
+std::mutex mtxPose;
+std::vector<PoseWorld> latestPoses;
+
+// ============================================================
+// HELPER
+// ============================================================
+
+void imshowScaled(const std::string& name, const cv::Mat& img)
+{
+    int maxW = 1600;
+    int maxH = 900;
+
     double scale = std::min(
-        maxW / double(img.cols),
-        maxH / double(img.rows)
-    );
-    if (scale < 1.0) {
+        maxW / (double)img.cols,
+        maxH / (double)img.rows);
+
+    if(scale < 1.0)
+    {
         cv::Mat r;
         cv::resize(img, r, {}, scale, scale);
         cv::imshow(name, r);
-    } else {
-        cv::imshow(name, img);
     }
+    else
+        cv::imshow(name, img);
 }
 
 // ============================================================
-// Capture Thread
+// CAPTURE THREAD
 // ============================================================
+
 void captureThread(GstElement* sink)
 {
-    while (running) {
+    while(running)
+    {
         GstSample* sample =
-            gst_app_sink_try_pull_sample(GST_APP_SINK(sink), 100000000);
-        if (!sample) continue;
+        gst_app_sink_try_pull_sample(
+            GST_APP_SINK(sink),
+            10000000);
 
-        GstBuffer* buffer = gst_sample_get_buffer(sample);
+        if(!sample) continue;
+
+        GstBuffer* buffer =
+        gst_sample_get_buffer(sample);
+
         GstMapInfo map;
         gst_buffer_map(buffer, &map, GST_MAP_READ);
 
-        GstCaps* caps = gst_sample_get_caps(sample);
-        GstStructure* s = gst_caps_get_structure(caps, 0);
-        int w, h;
-        gst_structure_get_int(s, "width", &w);
-        gst_structure_get_int(s, "height", &h);
+        GstCaps* caps =
+        gst_sample_get_caps(sample);
 
-        auto fd = std::make_shared<FrameData>();
-        fd->t_cam_ns = GST_BUFFER_PTS(buffer);
-        fd->frame = std::make_shared<cv::Mat>(
-            h, w, CV_8UC3, map.data);
-        fd->frame = std::make_shared<cv::Mat>(fd->frame->clone());
+        GstStructure* s =
+        gst_caps_get_structure(caps,0);
 
-        gst_buffer_unmap(buffer, &map);
+        int w,h;
+        gst_structure_get_int(s,"width",&w);
+        gst_structure_get_int(s,"height",&h);
+
+        auto frame =
+        std::make_shared<cv::Mat>(
+            h,w,CV_8UC3,map.data);
+
+        auto clone =
+        std::make_shared<cv::Mat>(
+            frame->clone());
+
+        gst_buffer_unmap(buffer,&map);
         gst_sample_unref(sample);
 
+        auto fd =
+        std::make_shared<FrameData>();
+
+        fd->frame = clone;
+        fd->timestamp =
+        GST_BUFFER_PTS(buffer);
+
         {
-            std::lock_guard<std::mutex> lk(m_cap);
-            cap_frame = fd;
+            std::lock_guard<std::mutex> lock(mtxFrame);
+            sharedFrame = fd;
         }
-        cv_cap.notify_one();
+
+        cvFrame.notify_all();
     }
 }
 
 // ============================================================
-// Low-Res Thread
+// DETECTOR CREATE
 // ============================================================
-void lowResThread()
+
+apriltag_detector_t* createDetector(int threads, float decimate)
 {
-    apriltag_family_t* tf = tag36h11_create();
-    apriltag_detector_t* td = apriltag_detector_create();
-    apriltag_detector_add_family(td, tf);
-    td->quad_decimate = 1.0;
-    td->nthreads = 1;
+    apriltag_family_t* tf =
+        tag36h11_create();
 
-    while (running) {
-        std::unique_lock<std::mutex> lk(m_cap);
-        cv_cap.wait(lk, []{ return cap_frame || !running; });
-        if (!running) break;
+    apriltag_detector_t* td =
+        apriltag_detector_create();
 
-        auto fd = cap_frame;
-        cap_frame.reset();
-        lk.unlock();
+    apriltag_detector_add_family(td,tf);
 
-        cv::Mat gray, low;
-        cv::cvtColor(*fd->frame, gray, cv::COLOR_BGR2GRAY);
-        cv::resize(gray, low, {LOW_W, LOW_H});
+    td->nthreads = threads;
+    td->quad_decimate = decimate;
+    td->quad_sigma = 0.0;
+    td->refine_edges = 1;
 
-        image_u8_t img {
-            low.cols, low.rows, int(low.step), low.data
-        };
+    return td;
+}
 
-        zarray_t* dets = apriltag_detector_detect(td, &img);
-        if (zarray_size(dets) == 0) {
-            apriltag_detections_destroy(dets);
-            continue;
-        }
+// ============================================================
+// DETECT TAGS
+// ============================================================
 
+std::vector<Detection>
+detectTags(apriltag_detector_t* td,
+           const cv::Mat& gray)
+{
+    image_u8_t img =
+    {
+        gray.cols,
+        gray.rows,
+        gray.cols,
+        gray.data
+    };
+
+    zarray_t* detections =
+    apriltag_detector_detect(td,&img);
+
+    std::vector<Detection> result;
+
+    for(int i=0;i<zarray_size(detections);i++)
+    {
         apriltag_detection_t* det;
-        zarray_get(dets, 0, &det);
+        zarray_get(detections,i,&det);
 
-        double minx=1e9,miny=1e9,maxx=-1e9,maxy=-1e9;
-        for (int i=0;i<4;i++) {
-            minx = std::min(minx, det->p[i][0]);
-            miny = std::min(miny, det->p[i][1]);
-            maxx = std::max(maxx, det->p[i][0]);
-            maxy = std::max(maxy, det->p[i][1]);
-        }
+        Detection d;
+        d.id = det->id;
 
-        float sx = float(gray.cols)/LOW_W;
-        float sy = float(gray.rows)/LOW_H;
-
-        auto rr = std::make_shared<ROIResult>();
-        rr->data = *fd;
-        rr->roi = cv::Rect(
-            int(minx*sx)-ROI_PAD,
-            int(miny*sy)-ROI_PAD,
-            int((maxx-minx)*sx)+2*ROI_PAD,
-            int((maxy-miny)*sy)+2*ROI_PAD
-        ) & cv::Rect(0,0,gray.cols,gray.rows);
-        rr->valid = true;
-
+        for(int k=0;k<4;k++)
         {
-            std::lock_guard<std::mutex> lk2(m_low);
-            roi_result = rr;
+            d.corners.emplace_back(
+                det->p[k][0],
+                det->p[k][1]);
         }
-        cv_low.notify_one();
 
-        apriltag_detections_destroy(dets);
+        result.push_back(d);
     }
 
-    apriltag_detector_destroy(td);
-    tag36h11_destroy(tf);
+    apriltag_detections_destroy(detections);
+
+    return result;
 }
 
 // ============================================================
-// High-Res Thread
+// CALIBRATION
 // ============================================================
-void highResThread(const cv::Mat& K, const cv::Mat& D)
+
+bool calibrate(
+    const std::vector<Detection>& dets,
+    const cv::Mat& K,
+    const cv::Mat& D)
 {
-    apriltag_family_t* tf = tag36h11_create();
-    apriltag_detector_t* td = apriltag_detector_create();
-    apriltag_detector_add_family(td, tf);
-    td->quad_decimate = 3.0;
+    std::vector<cv::Point3f> obj;
+    std::vector<cv::Point2f> img;
 
-    while (running) {
-        std::unique_lock<std::mutex> lk(m_low);
-        cv_low.wait(lk, []{ return roi_result || !running; });
-        if (!running) break;
+    for(auto& d : dets)
+    {
+        if(worldPoints.count(d.id)==0)
+            continue;
 
-        auto rr = roi_result;
-        roi_result.reset();
-        lk.unlock();
+        auto wp =
+        worldPoints[d.id];
 
-        if (!rr->valid) continue;
+        obj.push_back(wp);
+
+        cv::Point2f center =
+        (d.corners[0]+
+         d.corners[1]+
+         d.corners[2]+
+         d.corners[3]) * 0.25f;
+
+        img.push_back(center);
+    }
+
+    if(obj.size()<4)
+        return false;
+
+    cv::Mat rvec,tvec;
+
+    bool ok =
+    cv::solvePnP(
+        obj,img,
+        K,D,
+        rvec,tvec);
+
+    if(!ok) return false;
+
+    cv::Rodrigues(rvec,R_wc);
+    t_wc = tvec;
+
+    calibrated = true;
+
+    std::cout << "\nCALIBRATION COMPLETE\n";
+
+    return true;
+}
+
+// ============================================================
+// CAMERA->WORLD
+// ============================================================
+
+cv::Point3f cameraToWorld(const cv::Mat& tvec)
+{
+    cv::Mat p =
+    R_wc * tvec + t_wc;
+
+    return
+    cv::Point3f(
+        p.at<double>(0),
+        p.at<double>(1),
+        p.at<double>(2));
+}
+
+// ============================================================
+// TRACK THREAD
+// ============================================================
+
+void trackingThread(
+    const cv::Mat& K,
+    const cv::Mat& D)
+{
+    auto tdLow =
+    createDetector(2,2.0);
+
+    auto tdHigh =
+    createDetector(2,1.0);
+
+    while(running)
+    {
+        std::shared_ptr<FrameData> frame;
+
+        {
+            std::unique_lock<std::mutex> lock(mtxFrame);
+
+            cvFrame.wait(lock,
+                []{return sharedFrame!=nullptr;});
+
+            frame = sharedFrame;
+            sharedFrame.reset();
+        }
 
         cv::Mat gray;
-        cv::cvtColor(*rr->data.frame, gray, cv::COLOR_BGR2GRAY);
-        cv::Mat roi_gray = gray(rr->roi);
+        cv::cvtColor(
+            *frame->frame,
+            gray,
+            cv::COLOR_BGR2GRAY);
 
-        image_u8_t img {
-            roi_gray.cols, roi_gray.rows,
-            int(roi_gray.step), roi_gray.data
-        };
+        cv::Mat low;
+        cv::resize(
+            gray,low,
+            cv::Size(LOW_W,LOW_H));
 
-        zarray_t* dets = apriltag_detector_detect(td, &img);
-        if (zarray_size(dets) == 0) {
-            apriltag_detections_destroy(dets);
+        auto dets =
+        detectTags(tdLow,low);
+
+        if(!calibrated)
+        {
+            calibrate(dets,K,D);
             continue;
         }
 
-        apriltag_detection_t* det;
-        zarray_get(dets, 0, &det);
+        std::vector<PoseWorld> poses;
 
-        std::vector<cv::Point2f> img_pts;
-        for (int i=0;i<4;i++)
-            img_pts.emplace_back(
-                det->p[i][0]+rr->roi.x,
-                det->p[i][1]+rr->roi.y
-            );
+        for(auto& d : dets)
+        {
+            if(d.id!=TRACK_ID0 &&
+               d.id!=TRACK_ID1)
+               continue;
 
-        std::vector<cv::Point3f> obj_pts = {
-            {-TAG_SIZE/2,-TAG_SIZE/2,0},
-            { TAG_SIZE/2,-TAG_SIZE/2,0},
-            { TAG_SIZE/2, TAG_SIZE/2,0},
-            {-TAG_SIZE/2, TAG_SIZE/2,0}
-        };
+            std::vector<cv::Point2f> imgPts;
 
-        cv::Mat rvec, tvec;
-        cv::solvePnP(obj_pts, img_pts, K, D, rvec, tvec);
+            float sx =
+            gray.cols/(float)LOW_W;
 
-        cv::Mat R;
-        cv::Rodrigues(rvec, R);
-        double yaw = atan2(R.at<double>(1,0), R.at<double>(0,0))
-                     * 180.0 / CV_PI;
+            float sy =
+            gray.rows/(float)LOW_H;
 
-        auto pr = std::make_shared<PoseResult>();
-        pr->data = rr->data;
-        pr->tvec = tvec;
-        pr->yaw = yaw;
-        pr->roi = rr->roi;
-        pr->valid = true;
+            for(auto&p:d.corners)
+                imgPts.emplace_back(
+                    p.x*sx,p.y*sy);
+
+            std::vector<cv::Point3f> obj =
+            {
+                {-TAG_SIZE/2,-TAG_SIZE/2,0},
+                { TAG_SIZE/2,-TAG_SIZE/2,0},
+                { TAG_SIZE/2, TAG_SIZE/2,0},
+                {-TAG_SIZE/2, TAG_SIZE/2,0}
+            };
+
+            cv::Mat rvec,tvec;
+
+            cv::solvePnP(
+                obj,imgPts,
+                K,D,
+                rvec,tvec);
+
+            auto world =
+            cameraToWorld(tvec);
+
+            cv::Mat R;
+            cv::Rodrigues(rvec,R);
+
+            double yaw =
+            atan2(
+                R.at<double>(1,0),
+                R.at<double>(0,0))
+                *180/CV_PI;
+
+            poses.push_back(
+            {
+                d.id,
+                world.x,
+                world.y,
+                yaw
+            });
+
+            std::cout
+            << "Tag "
+            << d.id
+            << " X="
+            << world.x
+            << " Y="
+            << world.y
+            << " yaw="
+            << yaw
+            << "\n";
+        }
 
         {
-            std::lock_guard<std::mutex> lk2(m_high);
-            pose_result = pr;
+            std::lock_guard<std::mutex>
+            lock(mtxPose);
+
+            latestPoses = poses;
         }
-        cv_high.notify_one();
-
-        apriltag_detections_destroy(dets);
     }
-
-    apriltag_detector_destroy(td);
-    tag36h11_destroy(tf);
 }
 
 // ============================================================
-// Visualization Thread
+// VIS THREAD
 // ============================================================
+
 void visThread()
 {
-    while (running) {
-        std::unique_lock<std::mutex> lk(m_high);
-        cv_high.wait(lk, []{ return pose_result || !running; });
-        if (!running) break;
+    while(running)
+    {
+        std::vector<PoseWorld> poses;
 
-        auto pr = pose_result;
-        pose_result.reset();
-        lk.unlock();
+        {
+            std::lock_guard<std::mutex>
+            lock(mtxPose);
 
-        if (!pr->valid) continue;
+            poses = latestPoses;
+        }
 
-        cv::Mat vis = pr->data.frame->clone();
-        cv::rectangle(vis, pr->roi, {255,0,0}, 2);
+        if(!poses.empty())
+        {
+            cv::Mat img =
+            cv::Mat::zeros(
+                600,600,CV_8UC3);
 
-        char txt[128];
-        snprintf(txt, sizeof(txt),
-                 "X=%.2f Y=%.2f Yaw=%.1f",
-                 pr->tvec[0], pr->tvec[1], pr->yaw);
+            for(auto&p:poses)
+            {
+                int x =
+                int(p.X*50+300);
 
-        cv::putText(vis, txt, {30,40},
-                    cv::FONT_HERSHEY_SIMPLEX, 1.2,
-                    {0,255,0}, 2);
+                int y =
+                int(p.Y*50+300);
 
-        imshowScaled("AprilTag Multicore", vis);
+                cv::circle(
+                    img,
+                    {x,y},
+                    5,
+                    {0,255,0},
+                    -1);
+            }
 
-        if (cv::waitKey(1) == 'q')
-            running = false;
+            imshowScaled(
+                "World",img);
+        }
+
+        if(cv::waitKey(1)=='q')
+            running=false;
     }
 }
 
 // ============================================================
 // MAIN
 // ============================================================
-int main(int argc, char** argv)
+
+int main(int argc,char** argv)
 {
-    gst_init(&argc, &argv);
+    gst_init(&argc,&argv);
 
     std::string pipeline =
         "libcamerasrc "
@@ -315,29 +497,49 @@ int main(int argc, char** argv)
         "! video/x-raw,format=BGR "
         "! appsink name=sink drop=true max-buffers=1";
 
-    GstElement* pipe = gst_parse_launch(pipeline.c_str(), nullptr);
-    GstElement* sink = gst_bin_get_by_name(GST_BIN(pipe), "sink");
-    gst_element_set_state(pipe, GST_STATE_PLAYING);
+    GstElement* pipe =
+    gst_parse_launch(
+        pipeline.c_str(),
+        nullptr);
+
+    GstElement* sink =
+    gst_bin_get_by_name(
+        GST_BIN(pipe),
+        "sink");
+
+    gst_element_set_state(
+        pipe,
+        GST_STATE_PLAYING);
 
     cv::Mat K = (cv::Mat1d(3,3) <<
         (4009.22661/resoluion_divider),0,(2113.49677/resoluion_divider),
         0,(4020.48344/resoluion_divider),(1469.08894/resoluion_divider),
         0,0,1);
-        
-    cv::Mat D = (cv::Mat1d(1,5) <<
-        -0.49106571,0.283421,0.00061827,-0.00242921,-0.09694459);
 
-    std::thread t_cap(captureThread, sink);
-    std::thread t_low(lowResThread);
-    std::thread t_high(highResThread, K, D);
-    std::thread t_vis(visThread);
+    cv::Mat D =
+    (cv::Mat1d(1,5)<<
+    -0.49,0.28,0,0,-0.09);
 
-    t_cap.join();
-    t_low.join();
-    t_high.join();
-    t_vis.join();
+    std::thread cap(
+        captureThread,
+        sink);
 
-    gst_element_set_state(pipe, GST_STATE_NULL);
+    std::thread track(
+        trackingThread,
+        K,D);
+
+    std::thread vis(
+        visThread);
+
+    cap.join();
+    track.join();
+    vis.join();
+
+    gst_element_set_state(
+        pipe,
+        GST_STATE_NULL);
+
     gst_object_unref(pipe);
+
     return 0;
 }
