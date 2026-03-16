@@ -7,16 +7,22 @@ Aurora Propulsion Technologies IDD rev 5.0
 import serial
 import struct
 import crcmod
+import gpiod
 import threading
 import time
 from flask import Flask, render_template_string, jsonify
 from flask_cors import CORS
+from gpiod.line_settings import LineSettings, Direction, Value
 
 
 SERIAL_PORT = "/tmp/ttyVIRT0"    # Simulator mode
 # SERIAL_PORT = "/dev/ttyUSB0"   # Check with: ls /dev/ttyUSB*
 BAUD_RATE   = 115200
 TIMEOUT_S   = 1.0
+
+# GPIO config
+SOLENOID_GPIO = 17          # BCM 17 = physical pin 11
+GPIO_CHIP     = "/dev/gpiochip4"   # Pi 5 user GPIOs
 
 # ─────────────────────────────────────────
 # CRC setup (matches IDD spec)
@@ -78,6 +84,18 @@ def send_command(cmd: int, payload: bytes = b'') -> dict:
         return {"status": "error", "detail": str(e)}
 
 
+def set_solenoid(on: bool):
+    """Drive the MOSFET gate HIGH (solenoid on) or LOW (solenoid off)."""
+    val = Value.ACTIVE if on else Value.INACTIVE
+    settings = LineSettings(direction=Direction.OUTPUT, output_value=val)
+    req = gpiod.request_lines(
+        GPIO_CHIP,
+        consumer="solenoid-ctrl",
+        config={SOLENOID_GPIO: settings},
+    )
+    req.release()
+
+
 # ─────────────────────────────────────────
 # System state
 # ─────────────────────────────────────────
@@ -96,15 +114,20 @@ CORS(app)  # Allow React frontend to call this backend
 
 @app.route('/cmd/start', methods=['GET', 'POST'])
 def cmd_start():
-    """Set mode to Standby (1) then Early Deployment (2)."""
     # Step 1: Enter Standby
     r1 = send_command(CMD_SET_MODE, bytes([MODE_STANDBY]))
     time.sleep(0.5)
-    # Step 2: Enter Early Deployment (begins spin/deployment sequence)
+    # Step 2: Enter Early Deployment
     r2 = send_command(CMD_SET_MODE, bytes([MODE_EARLY_DEPLOYMENT]))
     
+    # Step 3: Energize solenoid (12V via MOSFET)
+    try:
+        set_solenoid(True)
+    except Exception as e:
+        return jsonify({"error": f"GPIO failed: {e}"}), 500
+
     system_state["running"] = True
-    system_state["last_action"] = "START → Mode 2 (Early Deployment)"
+    system_state["last_action"] = "START → Mode 2 + Solenoid ON"
     system_state["last_response"] = r2.get("raw", r2.get("detail", "?"))
     
     return jsonify({
@@ -115,11 +138,16 @@ def cmd_start():
 
 @app.route('/cmd/stop', methods=['GET', 'POST'])
 def cmd_stop():
-    """Emergency stop: immediately set Safe mode (0)."""
+    # Kill solenoid first (safe state)
+    try:
+        set_solenoid(False)
+    except Exception as e:
+        pass  # Still try to send safe mode even if GPIO fails
+    
     r = send_command(CMD_SET_MODE, bytes([MODE_SAFE]))
     
     system_state["running"] = False
-    system_state["last_action"] = "EMERGENCY STOP → Mode 0 (Safe)"
+    system_state["last_action"] = "STOP → Mode 0 + Solenoid OFF"
     system_state["last_response"] = r.get("raw", r.get("detail", "?"))
     
     return jsonify({
