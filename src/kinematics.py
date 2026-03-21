@@ -28,6 +28,21 @@ class KinematicsCalculator:
         self.memory_manager = memory_manager
         self.frame_data_buffer: List[FrameData] = []
         pass
+
+    @staticmethod
+    def _relative_position(position_data: dict) -> Vector2D:
+        """Relative end-mass position with respect to satellite."""
+        sat = position_data["satellite_position"]
+        end = position_data["end_mass_position"]
+        return Vector2D(x=end.x - sat.x, y=end.y - sat.y)
+
+    @staticmethod
+    def _orbital_angle(position_data: dict) -> float:
+        """Orbital angle around satellite in [0, 2π)."""
+        if "orbital_angular_position" in position_data:
+            return float(position_data["orbital_angular_position"])
+        rel = KinematicsCalculator._relative_position(position_data)
+        return (math.atan2(rel.y, rel.x) + 2 * math.pi) % (2 * math.pi)
     
     def calculate_velocity(self, current_pos: dict, 
                           previous_pos: dict) -> Vector2D:
@@ -40,13 +55,7 @@ class KinematicsCalculator:
             
         Returns:
             Velocity as Vector2D (units/second)
-            
-        TODO: Implement velocity calculation
-        - Extract positions and timestamps
-        - Calculate dx = x1 - x0, dy = y1 - y0
-        - Calculate dt = t1 - t0
-        - Return Vector2D(dx/dt, dy/dt)
-        - Handle dt = 0 case
+        
         """
         # Positions come from MemoryManager as Vector2D instances
         pos_cur = current_pos["position"]
@@ -76,9 +85,6 @@ class KinematicsCalculator:
         Returns:
             Acceleration as Vector2D (units/second²)
             
-        TODO: Implement acceleration calculation
-        - Calculate dvx = vx1 - vx0, dvy = vy1 - vy0
-        - Return Vector2D(dvx/dt, dvy/dt)
         """
         # Do not divide by zero or negative time deltas
         if dt <= 0:
@@ -100,11 +106,7 @@ class KinematicsCalculator:
             
         Returns:
             Angular velocity (rad/s)
-            
-        TODO: Implement angular velocity
-        - Calculate dθ = θ1 - θ0
-        - Handle wraparound at 2π (shortest path)
-        - Return dθ/dt
+
         """
         # No time elapsed → no angular motion defined
         if dt <= 0:
@@ -128,7 +130,6 @@ class KinematicsCalculator:
         Returns:
             Angular acceleration (rad/s²)
             
-        TODO: Implement angular acceleration
         """
         if dt <= 0:
             return 0.0
@@ -141,39 +142,39 @@ class KinematicsCalculator:
         Returns:
             FrameData object with all calculated values, or None if 
             insufficient data in buffer
-            
-        TODO: Implement complete processing pipeline
-        1. Get last 3-4 positions from MemoryManager
-        2. Check if enough data available (need at least 2 for velocity)
-        3. Calculate velocity from last 2 positions
-        4. Calculate acceleration (need at least 3 positions)
-        5. Calculate angular velocity and acceleration
-        6. Create FrameData object
-        7. Store in self.frame_data_buffer
-        8. Return FrameData
-        
-        IMPORTANT: Decide where to store FrameData objects:
-        - Option A: Keep in self.frame_data_buffer (list) for later retrieval
-        - Option B: Immediately pass to DataStreamer for transmission
-        - Option C: Both - store locally AND stream
+
         """
         # Most recent N position measurements from MemoryManager
         positions = self.memory_manager.get_recent_positions(n=3)
         if len(positions) < 2:
             return None
 
-        # Buffer is ordered newest first:
-        # positions[0] = current, positions[1] = previous, positions[2] = older
+        # Buffer is ordered newest first.
         current_pos = positions[0]
         previous_pos = positions[1]
+        required_keys = ("satellite_position", "end_mass_position")
+        if not all(k in current_pos for k in required_keys):
+            return None
+        if not all(k in previous_pos for k in required_keys):
+            return None
         dt_vel = current_pos["timestamp"] - previous_pos["timestamp"]
         if dt_vel <= 0:
             return None
 
-        velocity = self.calculate_velocity(current_pos, previous_pos)
+        # Build relative-position snapshots for derivative calculations.
+        current_rel = {
+            "timestamp": current_pos["timestamp"],
+            "position": self._relative_position(current_pos),
+        }
+        previous_rel = {
+            "timestamp": previous_pos["timestamp"],
+            "position": self._relative_position(previous_pos),
+        }
+
+        velocity = self.calculate_velocity(current_rel, previous_rel)
         angular_velocity = self.calculate_angular_velocity(
-            current_pos["angular_position"],
-            previous_pos["angular_position"],
+            self._orbital_angle(current_pos),
+            self._orbital_angle(previous_pos),
             dt_vel,
         )
 
@@ -181,28 +182,40 @@ class KinematicsCalculator:
         angular_acceleration = 0.0
         if len(positions) >= 3:
             older_pos = positions[2]
+            if not all(k in older_pos for k in required_keys):
+                return None
             dt_prev = previous_pos["timestamp"] - older_pos["timestamp"]
             if dt_prev > 0:
-                previous_vel = self.calculate_velocity(previous_pos, older_pos)
+                older_rel = {
+                    "timestamp": older_pos["timestamp"],
+                    "position": self._relative_position(older_pos),
+                }
+                previous_vel = self.calculate_velocity(previous_rel, older_rel)
                 acceleration = self.calculate_acceleration(
                     velocity, previous_vel, (dt_vel + dt_prev) / 2.0
                 )
                 prev_angular = self.calculate_angular_velocity(
-                    previous_pos["angular_position"],
-                    older_pos["angular_position"],
+                    self._orbital_angle(previous_pos),
+                    self._orbital_angle(older_pos),
                     dt_prev,
                 )
                 angular_acceleration = self.calculate_angular_acceleration(
                     angular_velocity, prev_angular, (dt_vel + dt_prev) / 2.0
                 )
 
+        relative_position = self._relative_position(current_pos)
+        satellite_position = current_pos.get("satellite_position", Vector2D(0.0, 0.0))
+        end_mass_position = current_pos.get("end_mass_position", relative_position)
         frame_data = FrameData(
             timestamp=current_pos["timestamp"],
             frame_id=current_pos["frame_id"],
-            position=current_pos["position"],
+            satellite_position=satellite_position,
+            end_mass_position=end_mass_position,
+            position=relative_position,
+            tether_length=relative_position.magnitude(),
             velocity=velocity,
             acceleration=acceleration,
-            angular_position=current_pos["angular_position"],
+            angular_position=self._orbital_angle(current_pos),
             angular_velocity=angular_velocity,
             angular_acceleration=angular_acceleration,
             tracking_confidence=current_pos.get("tracking_confidence", 1.0),

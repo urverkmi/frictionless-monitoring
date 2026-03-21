@@ -34,9 +34,14 @@ class FrameData:
     # Core measurements
     timestamp: float  # Unix timestamp in seconds
     frame_id: int  # Sequential frame number
+
+    # Absolute positions in image/world coordinates
+    satellite_position: Vector2D
+    end_mass_position: Vector2D
     
     # Position (pixels or calibrated units)
     position: Vector2D
+    tether_length: float = 0.0
     
     # Velocity (units/second)
     velocity: Vector2D
@@ -58,7 +63,10 @@ class FrameData:
         return {
             'timestamp': self.timestamp,
             'frame_id': self.frame_id,
+            'satellite_position': self.satellite_position.to_dict(),
+            'end_mass_position': self.end_mass_position.to_dict(),
             'position': self.position.to_dict(),
+            'tether_length': self.tether_length,
             'velocity': self.velocity.to_dict(),
             'acceleration': self.acceleration.to_dict(),
             'angular_position': self.angular_position,
@@ -78,7 +86,14 @@ class FrameData:
         return cls(
             timestamp=data['timestamp'],
             frame_id=data['frame_id'],
+            satellite_position=Vector2D.from_dict(
+                data.get('satellite_position', {'x': 0.0, 'y': 0.0})
+            ),
+            end_mass_position=Vector2D.from_dict(
+                data.get('end_mass_position', data['position'])
+            ),
             position=Vector2D.from_dict(data['position']),
+            tether_length=data.get('tether_length', Vector2D.from_dict(data['position']).magnitude()),
             velocity=Vector2D.from_dict(data['velocity']),
             acceleration=Vector2D.from_dict(data['acceleration']),
             angular_position=data['angular_position'],
@@ -222,7 +237,10 @@ if __name__ == "__main__":
     frame = FrameData(
         timestamp=1234567890.123,
         frame_id=42,
+        satellite_position=Vector2D(x=100.0, y=100.0),
+        end_mass_position=position,
         position=position,
+        tether_length=position.magnitude(),
         velocity=velocity,
         acceleration=acceleration,
         angular_position=1.57,  # ~90 degrees

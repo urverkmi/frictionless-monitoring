@@ -55,7 +55,7 @@ function generateMockData() {
       x: endMassX,
       y: endMassY
     },
-    tetherLength: TETHER_LENGTH,
+    tetherLength: Math.sqrt(endMassX ** 2 + endMassY ** 2),
     mainSize: MAIN_SIZE,
     endMassRadius: END_MASS_RADIUS,
     timestamp: Date.now()
