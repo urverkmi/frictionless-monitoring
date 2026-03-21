@@ -1,3 +1,4 @@
+# NOTE: Currently unused in the active C++ vision pipeline.
 from data_structures import CalibrationData, FrameData, Vector2D
 from frame_decoder import PositionDetector
 from memory import MemoryManager

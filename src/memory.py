@@ -28,17 +28,21 @@ class MemoryManager:
 
     def store_position_data(self, position_data: dict):
         """
-        Store position data from PositionDetector.
+        Store position data from upstream detector input.
         
         Args:
-            position_data: Dictionary from PositionDetector.read_position()
-                          Contains: timestamp, frame_id, position, 
-                                   angular_position, tracking_confidence
+            position_data: Dictionary from the active input source
+                          (e.g., C++ bridge, fake stream, or Python detector).
+                          Expected keys:
+                          - timestamp
+                          - frame_id
+                          - satellite_position
+                          - end_mass_position
+                          - orbital_angular_position
+                          - tracking_confidence
         
-        TODO: Implement storage
-        - Add to ring buffer (deque automatically removes oldest)
-        - Consider thread safety if needed (threading.Lock)
-        - Validate data before storing
+        Notes:
+        - Ring buffer automatically removes oldest entries at capacity.
         """
         if not position_data:
             return
@@ -53,10 +57,7 @@ class MemoryManager:
             
         Returns:
             List of position data dictionaries (newest first)
-            
-        TODO: Implement retrieval
-        - Return last N items from buffer
-        - Handle case where buffer has fewer than N items
+
         """
         if n <= 0 or not self.position_buffer:
             return []
@@ -73,16 +74,15 @@ class MemoryManager:
             
         Returns:
             Position data closest to target time, or None if buffer empty
-            
-        TODO: Optional - implement time-based lookup
+        Note:
+            Currently unused.
+            Kept for future synchronization/replay use cases.
         """
-        pass
+        return None
     
     def clear_buffer(self):
         """
         Clear all data from memory buffer.
-        
-        TODO: Implement buffer clearing
         """
         self.position_buffer.clear()
 
@@ -98,8 +98,6 @@ class MemoryManager:
                 'oldest_timestamp': float,
                 'newest_timestamp': float
             }
-            
-        TODO: Implement buffer info
         """
         if not self.position_buffer:
             return {

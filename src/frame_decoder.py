@@ -1,3 +1,4 @@
+# NOTE: Currently unused in the active C++ vision pipeline.
 import numpy as np
 from data_structures import FrameData, CalibrationData, Vector2D
 

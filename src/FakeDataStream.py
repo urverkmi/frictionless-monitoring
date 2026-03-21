@@ -35,15 +35,23 @@ DATA_PORT = 8080
 FPS = 60
 FRAME_INTERVAL = 1.0 / FPS
 
-# Simulated geometry (satellite fixed, end mass moves around it)
+# Simulated geometry
 SATELLITE_X = 100.0
 SATELLITE_Y = 100.0
-TETHER_LENGTH = 150
+SATELLITE_DRIFT_RADIUS = 20.0
 MAIN_SIZE = 20
 END_MASS_RADIUS = 12
 
 
-def make_end_mass_position(frame_id: int) -> tuple:
+def make_satellite_position(frame_id: int) -> tuple:
+    """Satellite drifts slowly to model free movement."""
+    angle = (frame_id / FPS) * 0.08
+    sx = SATELLITE_X + SATELLITE_DRIFT_RADIUS * math.cos(angle)
+    sy = SATELLITE_Y + SATELLITE_DRIFT_RADIUS * math.sin(angle)
+    return (sx, sy)
+
+
+def make_end_mass_position(frame_id: int, sat_x: float, sat_y: float) -> tuple:
     """Simple toy trajectory for the end mass.
 
     Circular motion around satellite so angular velocity is non-zero.
@@ -51,8 +59,8 @@ def make_end_mass_position(frame_id: int) -> tuple:
     # Rotate around satellite at ~0.5 rad/s (one full rotation in ~12 seconds)
     angle = (frame_id / FPS) * 0.5  # radians
     radius = 50.0  # distance from satellite
-    ex = SATELLITE_X + radius * math.cos(angle)
-    ey = SATELLITE_Y + radius * math.sin(angle)
+    ex = sat_x + radius * math.cos(angle)
+    ey = sat_y + radius * math.sin(angle)
     return (ex, ey)
 
 
@@ -63,9 +71,9 @@ def angle_from_center(sat_x: float, sat_y: float, ex: float, ey: float) -> float
     return (math.atan2(dy, dx) + 2 * math.pi) % (2 * math.pi)
 
 
-def frame_data_to_gui_payload(frame_data, satellite_xy: tuple) -> dict:
+def frame_data_to_gui_payload(frame_data) -> dict:
     """Convert FrameData + satellite position to the object shape dataService.js expects."""
-    sx, sy = satellite_xy
+    sx, sy = frame_data.satellite_position.x, frame_data.satellite_position.y
     # Represent angular speed in x/y components for GUI display requirements.
     angle = frame_data.angular_position
     omega = frame_data.angular_velocity
@@ -85,7 +93,7 @@ def frame_data_to_gui_payload(frame_data, satellite_xy: tuple) -> dict:
             "x": omega * math.cos(angle),
             "y": omega * math.sin(angle),
         },
-        "tetherLength": TETHER_LENGTH,
+        "tetherLength": frame_data.tether_length,
         "mainSize": MAIN_SIZE,
         "endMassRadius": END_MASS_RADIUS,
         "timestamp": int(frame_data.timestamp * 1000),
@@ -101,17 +109,19 @@ async def stream_loop(websocket):
     while True:
         t0 = time.perf_counter()
         timestamp = time.time()
-        # 1) Generate fake end-mass position for this frame
-        ex, ey = make_end_mass_position(frame_id)
+        # 1) Generate fake satellite + end-mass positions for this frame
+        sx, sy = make_satellite_position(frame_id)
+        ex, ey = make_end_mass_position(frame_id, sx, sy)
         frame_id += 1
 
-        angle = angle_from_center(SATELLITE_X, SATELLITE_Y, ex, ey)
+        angle = angle_from_center(sx, sy, ex, ey)
         # 2) Store position in MemoryManager (same format as PositionDetector)
         position_data = {
             "timestamp": timestamp,
             "frame_id": frame_id,
-            "position": Vector2D(ex, ey),
-            "angular_position": angle,
+            "satellite_position": Vector2D(sx, sy),
+            "end_mass_position": Vector2D(ex, ey),
+            "orbital_angular_position": angle,
             "tracking_confidence": 1.0,
         }
         memory.store_position_data(position_data)
@@ -120,9 +130,7 @@ async def stream_loop(websocket):
 
         if frame_data is not None:
             # 4) Convert to GUI payload shape and send over WebSocket
-            payload = frame_data_to_gui_payload(
-                frame_data, (SATELLITE_X, SATELLITE_Y)
-            )
+            payload = frame_data_to_gui_payload(frame_data)
             try:
                 await websocket.send(json.dumps(payload))
             except Exception:
