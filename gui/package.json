@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "react-scripts start",
+    "game": "REACT_APP_MODE=game react-scripts start",
     "build": "react-scripts build"
   },
   "browserslist": {
