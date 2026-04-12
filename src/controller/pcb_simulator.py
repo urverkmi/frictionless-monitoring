@@ -140,29 +140,91 @@ def run_simulator(port_path: str):
 
 def create_virtual_ports():
     """
-    Use socat to create a linked virtual serial port pair:
+    Create a linked virtual serial port pair:
       /tmp/ttyVIRT0  ←→  /tmp/ttyVIRT1
-    app.py connects to ttyVIRT0, simulator listens on ttyVIRT1.
+    controller_app.py connects to ttyVIRT0, simulator listens on ttyVIRT1.
+
+    Uses socat on Linux, pty on macOS.
+    Returns (cleanup_callable, simulator_port_path).
     """
-    import subprocess
-    print("[SIM] Creating virtual serial port pair via socat...")
-    proc = subprocess.Popen([
-        'socat',
-        'PTY,link=/tmp/ttyVIRT0,raw,echo=0',
-        'PTY,link=/tmp/ttyVIRT1,raw,echo=0'
-    ])
-    time.sleep(1)  # Give socat a moment to create the symlinks
-    print("[SIM] Virtual ports ready:")
-    print("       controller_app.py  → set SERIAL_PORT = '/tmp/ttyVIRT0'")
-    print("       simulator → listening on /tmp/ttyVIRT1\n")
-    return proc
+    import platform
+
+    if platform.system() == "Linux":
+        import subprocess
+        print("[SIM] Creating virtual serial port pair via socat...")
+        proc = subprocess.Popen([
+            'socat',
+            'PTY,link=/tmp/ttyVIRT0,raw,echo=0',
+            'PTY,link=/tmp/ttyVIRT1,raw,echo=0'
+        ])
+        time.sleep(1)
+        print("[SIM] Virtual ports ready:")
+        print("       controller_app.py  → /tmp/ttyVIRT0")
+        print("       simulator          → /tmp/ttyVIRT1\n")
+        return proc.terminate, '/tmp/ttyVIRT1'
+    else:
+        # macOS / other: use pty pair
+        import tty
+        print("[SIM] Creating virtual serial port pair via pty...")
+        master_fd, slave_fd = pty.openpty()
+        tty.setraw(master_fd)
+        tty.setraw(slave_fd)
+        slave_name = os.ttyname(slave_fd)
+        # Symlink so controller_app.py can open a known path
+        for path in ['/tmp/ttyVIRT0', '/tmp/ttyVIRT1']:
+            if os.path.islink(path) or os.path.exists(path):
+                os.remove(path)
+        os.symlink(slave_name, '/tmp/ttyVIRT0')  # controller side
+        # Simulator reads/writes via the master fd directly
+        print(f"[SIM] Virtual ports ready:")
+        print(f"       controller_app.py  → /tmp/ttyVIRT0 ({slave_name})")
+        print(f"       simulator          → master fd\n")
+
+        def cleanup():
+            os.close(master_fd)
+            os.close(slave_fd)
+            for path in ['/tmp/ttyVIRT0', '/tmp/ttyVIRT1']:
+                if os.path.islink(path):
+                    os.remove(path)
+
+        return cleanup, master_fd
+
+
+def run_simulator_fd(fd):
+    """Simulator loop for pty master fd (macOS)."""
+    print(f"[SIM] Ready (pty fd). Waiting for commands...\n")
+    buf = b''
+    while True:
+        try:
+            chunk = os.read(fd, 64)
+        except OSError:
+            break
+        if not chunk:
+            continue
+        buf += chunk
+        print(f"  [SIM] Raw bytes received: {buf.hex()}")
+
+        parsed = parse_packet(buf)
+        if parsed:
+            response = handle_command(parsed)
+            os.write(fd, response)
+            print(f"  [SIM] Response sent: {response.hex()}\n")
+            buf = b''
+        elif len(buf) > 64:
+            print(f"  [SIM] Buffer overflow — clearing")
+            buf = b''
 
 
 if __name__ == '__main__':
-    socat_proc = create_virtual_ports()
+    cleanup, sim_port = create_virtual_ports()
     try:
-        run_simulator('/tmp/ttyVIRT1')
+        if isinstance(sim_port, int):
+            # macOS: sim_port is a file descriptor
+            run_simulator_fd(sim_port)
+        else:
+            # Linux: sim_port is a path string
+            run_simulator(sim_port)
     except KeyboardInterrupt:
         print("\n[SIM] Shutting down simulator.")
     finally:
-        socat_proc.terminate()
+        cleanup()

@@ -11,7 +11,7 @@ import { sendStart, sendStop } from './services/controlService';
  * User clicks START in React
  *     → onStart() in App.js
  *         → sendStart() in controlService.js
- *             → POST http://pi.local:5000/cmd/start  (HTTP over WiFi/Ethernet)
+ *             → POST http://pi.local:5001/cmd/start  (HTTP over WiFi/Ethernet)
  *                 → Flask sets MODE_STANDBY, then MODE_EARLY_DEPLOYMENT
  *                     → build_packet() constructs RS422 binary frame
  *                         → serial.Serial writes to /dev/ttyUSB0
@@ -36,6 +36,7 @@ function App() {
 
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
   const [controlStatus, setControlStatus] = useState('idle');
+  const [targetPWM, setTargetPWM] = useState(200);
 
   useEffect(() => {
     const handleData = (newData) => setData(newData);
@@ -48,7 +49,7 @@ function App() {
 
   const handleStart = async () => {
     try {
-      await sendStart();
+      await sendStart(targetPWM);
       setControlStatus('running');
     } catch (err) {
       console.error(err);
@@ -80,6 +81,8 @@ function App() {
         onStart={handleStart}
         onStop={handleStop}
         status={controlStatus}
+        targetPWM={targetPWM}
+        onTargetPWMChange={setTargetPWM}
       />
     </div>
   );

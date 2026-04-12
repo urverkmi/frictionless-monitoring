@@ -1,6 +1,6 @@
 import React from 'react';
 
-function ControlPanel({ onStart, onStop, status }) {
+function ControlPanel({ onStart, onStop, status, targetPWM, onTargetPWMChange }) {
   return (
     <div style={{
       width: '250px',
@@ -12,6 +12,29 @@ function ControlPanel({ onStart, onStop, status }) {
       gap: '12px'
     }}>
       <h2>Control Panel</h2>
+
+      <label style={{ fontSize: '14px', color: '#9ca3af' }}>
+        Target PWM (50–200)
+        <input
+          type="number"
+          min={50}
+          max={200}
+          value={targetPWM}
+          onChange={(e) => onTargetPWMChange(Number(e.target.value))}
+          style={{
+            display: 'block',
+            width: '100%',
+            marginTop: '4px',
+            padding: '8px',
+            backgroundColor: '#1f2937',
+            border: '1px solid #374151',
+            borderRadius: '6px',
+            color: '#e2e8f0',
+            fontSize: '16px',
+            boxSizing: 'border-box'
+          }}
+        />
+      </label>
 
       <button
         onClick={onStart}

@@ -11,18 +11,28 @@ mkdir -p "$LOG_DIR"
 
 # ── Kill any stale processes left from a previous run ──
 pkill -f "pcb_simulator.py"  2>/dev/null || true
+pkill -f "esp32_simulator.py" 2>/dev/null || true
 pkill -f "controller_app.py" 2>/dev/null || true
 pkill -f "FakeDataStream.py" 2>/dev/null || true
 pkill -f "tail.*$LOG_DIR"    2>/dev/null || true
-fuser -k 5000/tcp 2>/dev/null || true
-fuser -k 3000/tcp 2>/dev/null || true
-fuser -k 8080/tcp 2>/dev/null || true
+# Kill processes on ports (cross-platform: fuser on Linux, lsof on macOS)
+kill_port() {
+  if command -v fuser &>/dev/null; then
+    fuser -k "$1/tcp" 2>/dev/null || true
+  else
+    lsof -ti :"$1" 2>/dev/null | xargs kill -9 2>/dev/null || true
+  fi
+}
+kill_port 5001
+kill_port 3000
+kill_port 8080
 sleep 1
 
 # Clear old logs
 > "$LOG_DIR/flask.log"
 > "$LOG_DIR/react.log"
 > "$LOG_DIR/simulator.log"
+> "$LOG_DIR/esp32_sim.log"
 > "$LOG_DIR/fakedata.log"
 
 echo "════════════════════════════════════════"
@@ -39,7 +49,7 @@ fi
 cleanup() {
   echo ""
   echo "Shutting down..."
-  kill "${SIM_PID:-}" "$FLASK_PID" "${FAKEDATA_PID:-}" "$REACT_PID" "$TAIL_PID" 2>/dev/null
+  kill "${SIM_PID:-}" "${ESP32_SIM_PID:-}" "$FLASK_PID" "${FAKEDATA_PID:-}" "$REACT_PID" "$TAIL_PID" 2>/dev/null
   wait 2>/dev/null
   exit 0
 }
@@ -52,20 +62,25 @@ pip3 install -r "$REPO_DIR/requirements.txt" --quiet --break-system-packages
 # ── 2. Start simulator first so virtual ports exist ──
 if [ "$SIM_MODE" = true ]; then
   echo "[2/3] Starting PCB simulator..."
-  (cd "$REPO_DIR/src" && python3 -u pcb_simulator.py >> "$LOG_DIR/simulator.log" 2>&1) &
+  (cd "$REPO_DIR/src/controller" && python3 -u pcb_simulator.py >> "$LOG_DIR/simulator.log" 2>&1) &
   SIM_PID=$!
   sleep 3
+
+  echo "      Starting ESP32 simulator..."
+  (cd "$REPO_DIR/src/controller" && python3 -u esp32_simulator.py >> "$LOG_DIR/esp32_sim.log" 2>&1) &
+  ESP32_SIM_PID=$!
+  sleep 2
 fi
 
 # ── 3. Start Flask backend ───────────────────
-echo "[3/3] Starting Flask backend (port 5000)..."
-(cd "$REPO_DIR/src" && python3 controller_app.py >> "$LOG_DIR/flask.log" 2>&1) &
+echo "[3/3] Starting Flask backend (port 5001)..."
+(cd "$REPO_DIR/src/controller" && python3 controller_app.py >> "$LOG_DIR/flask.log" 2>&1) &
 FLASK_PID=$!
 sleep 2
 
 # ── 4. Start FakeDataStream WebSocket server ─
 echo "      Starting data stream (port 8080)..."
-(cd "$REPO_DIR/src" && python3 -u FakeDataStream.py >> "$LOG_DIR/fakedata.log" 2>&1) &
+(cd "$REPO_DIR/src/camera" && python3 -u FakeDataStream.py >> "$LOG_DIR/fakedata.log" 2>&1) &
 FAKEDATA_PID=$!
 sleep 1
 
@@ -75,7 +90,7 @@ if [ ! -d "$REPO_DIR/gui/node_modules" ]; then
   echo "      node_modules not found — running npm install..."
   (cd "$REPO_DIR/gui" && npm install)
 fi
-(cd "$REPO_DIR/gui" && npm start >> "$LOG_DIR/react.log" 2>&1) &
+(cd "$REPO_DIR/gui" && BROWSER=none npm start >> "$LOG_DIR/react.log" 2>&1) &
 REACT_PID=$!
 
 # Brief pause then wipe the startup noise
@@ -88,7 +103,7 @@ if [ "$SIM_MODE" = true ]; then
 echo "  ⚠  SIMULATOR MODE"
 fi
 echo "════════════════════════════════════════"
-echo "  ✓ Backend:   http://localhost:5000"
+echo "  ✓ Backend:   http://localhost:5001"
 echo "  ✓ Frontend:  http://localhost:3000"
 echo ""
 echo "  Full logs (other terminal):"
@@ -103,7 +118,7 @@ echo "  (start/stop commands from the GUI appear here)"
 echo ""
 
 # -n 0: only show lines written after this point (no startup replay)
-tail -n 0 -f "$LOG_DIR/simulator.log" &
+tail -n 0 -f "$LOG_DIR/simulator.log" "$LOG_DIR/esp32_sim.log" &
 TAIL_PID=$!
 
 wait "$FLASK_PID" "$REACT_PID"
