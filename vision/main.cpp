@@ -1,13 +1,46 @@
+// ============================================================
+//  Dual-camera AprilTag tracker
+//
+//  Layout:
+//    - Two cameras, each independently calibrated against the
+//      same rectangular ground-plane marker frame.
+//    - Calibration rectangle corners (IDs 2-5) are placed so
+//      the short axis fits within each camera's FOV; both cameras
+//      see the two central (overlap) markers.
+//    - Tracking tags (IDs 0, 1) are fused: if both cameras see
+//      a tag the higher-confidence estimate wins; otherwise the
+//      single visible estimate is used.
+//    - Each JSON line on stdout contains the fused pose + per-
+//      camera visibility & confidence for diagnostics.
+//
+//  Calibration rectangle corner IDs and world positions
+//  (origin = centre, X = long axis, Y = short axis, Z up):
+//
+//         ID 2 -------- ID 3
+//          |              |
+//    CAM_A |   OVERLAP    | CAM_B
+//          |              |
+//         ID 5 -------- ID 4
+//
+//  CALIB_W  = full width  (long axis, X)
+//  CALIB_H  = full height (short axis, Y)
+//  Place CALIB_W so cam-A sees IDs 2,5 fully and
+//  the overlap zone shows IDs 2,3 / 5,4 partially.
+//  Typical: CALIB_W=1.60 m, CALIB_H=0.60 m.
+// ============================================================
+
 #include <iostream>
 #include <thread>
 #include <mutex>
 #include <atomic>
 #include <map>
 #include <vector>
-#include <chrono>
-#include <cmath>
+#include <array>
+#include <string>
 #include <sstream>
 #include <iomanip>
+#include <cmath>
+#include <chrono>
 
 #include <opencv2/opencv.hpp>
 
@@ -21,38 +54,108 @@
 // USER PARAMETERS
 // ============================================================
 
-constexpr int    resolution_divider = 2;
+constexpr int    RESOLUTION_DIVIDER = 2;
 
-constexpr int    DISPLAY_W          = 2028;
-constexpr int    DISPLAY_H          = 1520;
+// Physical display size per camera pane
+constexpr int    DISPLAY_W          = 1014;    // half of 2028
+constexpr int    DISPLAY_H          =  760;    // half of 1520
 
-constexpr double TAG_SIZE           = 0.10;   // metres, tracking tags
-constexpr double TAG_SIZE_ID1       = 0.20;   // metres (reserved)
-constexpr double CALIB_SQUARE       = 0.80;   // metres
+// AprilTag physical sizes (metres)
+constexpr double TAG_SIZE           = 0.10;    // tracking tags  (IDs 0,1)
+constexpr double CALIB_TAG_SIZE     = 0.10;    // calibration tags (IDs 2-5)
 
+// Calibration rectangle (metres)
+// CALIB_W  = long axis  (camera separation direction, X)
+// CALIB_H  = short axis (Y)
+// Make CALIB_H short enough that all 4 markers fit in each camera's FOV
+// when shooting from the side.  CALIB_W can be as long as needed for
+// the desired tracking area width.
+constexpr double CALIB_W            = 1.60;
+constexpr double CALIB_H            = 0.60;
+
+// Tracking tag IDs
 constexpr int    TRACK_TAG0         = 0;
 constexpr int    TRACK_TAG1         = 1;
 
-// Confidence thresholds / weights  (tune to your scene)
-constexpr double W_MARGIN           = 0.50;   // decision_margin weight
-constexpr double W_HAMMING          = 0.25;   // hamming penalty weight
-constexpr double W_REPROJ           = 0.15;   // reprojection-error weight
-constexpr double W_SIZE             = 0.10;   // tag pixel-size weight
+// Confidence weights & saturation values
+constexpr double W_MARGIN           = 0.50;
+constexpr double W_HAMMING          = 0.25;
+constexpr double W_REPROJ           = 0.15;
+constexpr double W_SIZE             = 0.10;
 
-constexpr double MARGIN_SAT         = 80.0;   // margin value that maps to score 1.0
-constexpr double SIZE_SAT           = 200.0;  // pixel diagonal that maps to score 1.0
-constexpr double REPROJ_MAX         = 5.0;    // reprojection error (px) that maps to score 0.0
+constexpr double MARGIN_SAT         = 80.0;    // maps to conf=1
+constexpr double SIZE_SAT           = 200.0;   // px diagonal -> conf=1
+constexpr double REPROJ_MAX         = 5.0;     // px error   -> conf=0
+
+// GStreamer camera device identifiers (adjust to your system)
+const std::string CAM_DEVICE_A = "/dev/video0";
+const std::string CAM_DEVICE_B = "/dev/video1";
 
 // ============================================================
-// GLOBAL STATE
+// CAMERA INTRINSICS  (same sensor assumed; scale by divider)
 // ============================================================
 
-std::atomic<bool>     running(true);
-std::atomic<bool>     calibrated(false);
-std::atomic<uint64_t> frameCounter(0);
+static cv::Mat makeK()
+{
+    return (cv::Mat1d(3, 3) <<
+        4009.22661 / RESOLUTION_DIVIDER, 0.0, 2113.49677 / RESOLUTION_DIVIDER,
+        0.0, 4020.48344 / RESOLUTION_DIVIDER, 1469.08894 / RESOLUTION_DIVIDER,
+        0.0, 0.0, 1.0);
+}
 
-std::mutex  frameMutex;
-cv::Mat     latestFrame;
+static cv::Mat makeD()
+{
+    return (cv::Mat1d(1, 5) << -0.49, 0.28, 0.0, 0.0, -0.09);
+}
+
+// ============================================================
+// CALIBRATION RECTANGLE  -  world corners for each tag
+//
+// Tags sit AT the corners of the rectangle.
+// Corner ordering matches AprilTag CCW p[0..3]:
+//   p[0]=TL, p[1]=TR, p[2]=BR, p[3]=BL
+//
+//  World frame: X right (long axis), Y up (short axis), Z out.
+//  Rectangle centre = origin.
+//
+//   ID 2: top-left   (-W/2,  H/2)   tag grows inward (+X, -Y)
+//   ID 3: top-right  ( W/2,  H/2)   tag grows inward (-X, -Y)
+//   ID 4: bot-right  ( W/2, -H/2)   tag grows inward (-X, +Y)
+//   ID 5: bot-left   (-W/2, -H/2)   tag grows inward (+X, +Y)
+// ============================================================
+
+static std::map<int, std::vector<cv::Point3f>> buildWorldTagCorners()
+{
+    const double W = CALIB_W;
+    const double H = CALIB_H;
+    const double S = CALIB_TAG_SIZE;
+
+    return {
+        // ID 2 - top-left
+        {2, { {(float)(-W/2),   (float)( H/2),   0},
+              {(float)(-W/2+S), (float)( H/2),   0},
+              {(float)(-W/2+S), (float)( H/2-S), 0},
+              {(float)(-W/2),   (float)( H/2-S), 0} }},
+
+        // ID 3 - top-right
+        {3, { {(float)( W/2-S), (float)( H/2),   0},
+              {(float)( W/2),   (float)( H/2),   0},
+              {(float)( W/2),   (float)( H/2-S), 0},
+              {(float)( W/2-S), (float)( H/2-S), 0} }},
+
+        // ID 4 - bot-right
+        {4, { {(float)( W/2-S), (float)(-H/2+S), 0},
+              {(float)( W/2),   (float)(-H/2+S), 0},
+              {(float)( W/2),   (float)(-H/2),   0},
+              {(float)( W/2-S), (float)(-H/2),   0} }},
+
+        // ID 5 - bot-left
+        {5, { {(float)(-W/2),   (float)(-H/2+S), 0},
+              {(float)(-W/2+S), (float)(-H/2+S), 0},
+              {(float)(-W/2+S), (float)(-H/2),   0},
+              {(float)(-W/2),   (float)(-H/2),   0} }}
+    };
+}
 
 // ============================================================
 // DATA STRUCTS
@@ -68,68 +171,66 @@ struct Pose
 struct TagState
 {
     Pose   pose;
-    double confidence = 0.0;   // [0 .. 1]
+    double confidence = 0.0;
     bool   visible    = false;
 };
 
-std::mutex   poseMutex;
-TagState     tag0State;
-TagState     tag1State;
-
-// Camera -> world transform
-cv::Mat R_wc;
-cv::Mat t_wc;
-
 // ============================================================
-// CAMERA INTRINSICS  (full-res values, divided by resolution_divider)
+// CAMERA CONTEXT  -  everything belonging to one camera
 // ============================================================
 
-cv::Mat K = (cv::Mat1d(3, 3) <<
-    4009.22661 / resolution_divider, 0.0,  2113.49677 / resolution_divider,
-    0.0, 4020.48344 / resolution_divider,  1469.08894 / resolution_divider,
-    0.0, 0.0, 1.0);
-
-cv::Mat D = (cv::Mat1d(1, 5) <<
-    -0.49, 0.28, 0.0, 0.0, -0.09);
-
-// ============================================================
-// WORLD CORNERS OF CALIBRATION TAGS
-// ============================================================
-
-std::map<int, std::vector<cv::Point3f>> worldTagCorners =
+struct CameraContext
 {
-    {2, { {-CALIB_SQUARE/2,           -CALIB_SQUARE/2,           0},
-          {-CALIB_SQUARE/2+TAG_SIZE,  -CALIB_SQUARE/2,           0},
-          {-CALIB_SQUARE/2+TAG_SIZE,  -CALIB_SQUARE/2+TAG_SIZE,  0},
-          {-CALIB_SQUARE/2,           -CALIB_SQUARE/2+TAG_SIZE,  0} }},
+    int         id;
+    std::string device;
 
-    {3, { { CALIB_SQUARE/2,           -CALIB_SQUARE/2,           0},
-          { CALIB_SQUARE/2+TAG_SIZE,  -CALIB_SQUARE/2,           0},
-          { CALIB_SQUARE/2+TAG_SIZE,  -CALIB_SQUARE/2+TAG_SIZE,  0},
-          { CALIB_SQUARE/2,           -CALIB_SQUARE/2+TAG_SIZE,  0} }},
+    // GStreamer
+    GstElement* pipeline = nullptr;
+    GstElement* sink     = nullptr;
 
-    {4, { { CALIB_SQUARE/2,           CALIB_SQUARE/2,            0},
-          { CALIB_SQUARE/2+TAG_SIZE,   CALIB_SQUARE/2,            0},
-          { CALIB_SQUARE/2+TAG_SIZE,   CALIB_SQUARE/2+TAG_SIZE,   0},
-          { CALIB_SQUARE/2,            CALIB_SQUARE/2+TAG_SIZE,   0} }},
+    // Frame buffer
+    std::mutex  frameMutex;
+    cv::Mat     latestFrame;
 
-    {5, { {-CALIB_SQUARE/2,            CALIB_SQUARE/2,            0},
-          {-CALIB_SQUARE/2+TAG_SIZE,   CALIB_SQUARE/2,            0},
-          {-CALIB_SQUARE/2+TAG_SIZE,   CALIB_SQUARE/2+TAG_SIZE,   0},
-          {-CALIB_SQUARE/2,            CALIB_SQUARE/2+TAG_SIZE,   0} }}
+    // Intrinsics
+    cv::Mat     K;
+    cv::Mat     D;
+
+    // Extrinsics (camera -> world)
+    cv::Mat     R_wc;
+    cv::Mat     t_wc;
+    std::atomic<bool> calibrated{false};
+
+    // Latest per-frame observations
+    std::mutex  obsMutex;
+    TagState    tag0obs;
+    TagState    tag1obs;
 };
+
+// ============================================================
+// GLOBAL STATE
+// ============================================================
+
+std::atomic<bool>     running(true);
+std::atomic<uint64_t> frameCounter(0);
+
+std::array<CameraContext, 2> cameras;
+
+std::mutex   fusedMutex;
+TagState     fusedTag0;
+TagState     fusedTag1;
+
+static const auto worldTagCorners = buildWorldTagCorners();
 
 // ============================================================
 // HELPERS
 // ============================================================
 
-// Clamp x to [0, 1]
 static inline double clamp01(double x)
 {
     return std::max(0.0, std::min(1.0, x));
 }
 
-// Pixel-space diagonal of the detected quad
 static double tagPixelDiagonal(apriltag_detection_t* det)
 {
     double dx = det->p[2][0] - det->p[0][0];
@@ -137,87 +238,72 @@ static double tagPixelDiagonal(apriltag_detection_t* det)
     return std::sqrt(dx*dx + dy*dy);
 }
 
-// Reprojection error: re-project 3-D tag corners back with the solved pose,
-// compare to detected 2-D corners.  Returns mean error in pixels.
 static double reprojectionError(
     const std::vector<cv::Point3f>& obj,
     const std::vector<cv::Point2f>& img,
     const cv::Mat& rvec,
-    const cv::Mat& tvec)
+    const cv::Mat& tvec,
+    const cv::Mat& K,
+    const cv::Mat& D)
 {
-    std::vector<cv::Point2f> projected;
-    cv::projectPoints(obj, rvec, tvec, K, D, projected);
-
+    std::vector<cv::Point2f> proj;
+    cv::projectPoints(obj, rvec, tvec, K, D, proj);
     double err = 0.0;
     for (size_t i = 0; i < img.size(); ++i)
     {
-        double dx = img[i].x - projected[i].x;
-        double dy = img[i].y - projected[i].y;
+        double dx = img[i].x - proj[i].x;
+        double dy = img[i].y - proj[i].y;
         err += std::sqrt(dx*dx + dy*dy);
     }
     return err / static_cast<double>(img.size());
 }
-
-// ============================================================
-// CONFIDENCE SCORE
-//
-// Combines four signals:
-//
-//   1. decision_margin  – how unambiguous the bit pattern match was.
-//                         Higher = better.  Saturates at MARGIN_SAT.
-//
-//   2. hamming distance – number of bit-errors corrected.
-//                         0 → score 1.0,  1 → 0.5,  2 → 0.0.
-//                         (tag36h11 allows up to hamming=1 by default)
-//
-//   3. reprojection err – mean pixel error after solvePnP.
-//                         0 px → 1.0,  REPROJ_MAX px → 0.0.
-//
-//   4. tag pixel size   – larger apparent size = more detail = better.
-//                         Saturates at SIZE_SAT px diagonal.
-//
-// Final score is a weighted sum, clamped to [0, 1].
-// ============================================================
 
 static double computeConfidence(
     apriltag_detection_t* det,
     const cv::Mat& rvec,
     const cv::Mat& tvec,
     const std::vector<cv::Point3f>& obj,
-    const std::vector<cv::Point2f>& img)
+    const std::vector<cv::Point2f>& img,
+    const cv::Mat& K,
+    const cv::Mat& D)
 {
-    // --- 1. decision_margin score ---
     double s_margin = clamp01(det->decision_margin / MARGIN_SAT);
 
-    // --- 2. hamming score ---
     double s_hamming;
     switch (det->hamming)
     {
         case 0:  s_hamming = 1.00; break;
         case 1:  s_hamming = 0.50; break;
-        default: s_hamming = 0.00; break;   // ≥2 errors → discard
+        default: s_hamming = 0.00; break;
     }
 
-    // --- 3. reprojection error score ---
-    double reproj   = reprojectionError(obj, img, rvec, tvec);
+    double reproj   = reprojectionError(obj, img, rvec, tvec, K, D);
     double s_reproj = clamp01(1.0 - reproj / REPROJ_MAX);
 
-    // --- 4. pixel size score ---
     double diag   = tagPixelDiagonal(det);
     double s_size = clamp01(diag / SIZE_SAT);
 
-    // --- weighted sum ---
-    double confidence =
+    return clamp01(
         W_MARGIN  * s_margin  +
         W_HAMMING * s_hamming +
         W_REPROJ  * s_reproj  +
-        W_SIZE    * s_size;
+        W_SIZE    * s_size);
+}
 
-    return clamp01(confidence);
+static cv::Point3f camToWorld(
+    const cv::Mat& tvec,
+    const cv::Mat& R_wc,
+    const cv::Mat& t_wc)
+{
+    if (R_wc.empty() || t_wc.empty()) return {0, 0, 0};
+    cv::Mat p = R_wc * tvec + t_wc;
+    return { (float)p.at<double>(0),
+             (float)p.at<double>(1),
+             (float)p.at<double>(2) };
 }
 
 // ============================================================
-// APRILTAG DETECTOR
+// APRILTAG DETECTOR FACTORY
 // ============================================================
 
 static apriltag_detector_t* createDetector()
@@ -225,21 +311,40 @@ static apriltag_detector_t* createDetector()
     auto tf = tag36h11_create();
     auto td = apriltag_detector_create();
     apriltag_detector_add_family(td, tf);
-    td->quad_decimate  = 2.0;
-    td->nthreads       = 4;
-    td->refine_edges   = 1;
+    td->quad_decimate = 2.0;
+    td->nthreads      = 4;
+    td->refine_edges  = 1;
     return td;
 }
 
 // ============================================================
-// CAMERA CAPTURE THREAD
+// GSTREAMER PIPELINE BUILDER
 // ============================================================
 
-void captureThread(GstElement* sink)
+static std::string buildPipeline(const std::string& device)
+{
+    const int cam_w = 4056 / RESOLUTION_DIVIDER;
+    const int cam_h = 3040 / RESOLUTION_DIVIDER;
+
+    return
+        "libcamerasrc camera-name=" + device + " ! "
+        "video/x-raw,width="  + std::to_string(cam_w) +
+        ",height=" + std::to_string(cam_h) +
+        ",format=BGRx ! "
+        "videoconvert ! "
+        "video/x-raw,format=BGR ! "
+        "appsink name=sink max-buffers=1 drop=true";
+}
+
+// ============================================================
+// PER-CAMERA CAPTURE THREAD
+// ============================================================
+
+void captureThread(CameraContext& cam)
 {
     while (running)
     {
-        auto sample = gst_app_sink_pull_sample(GST_APP_SINK(sink));
+        auto sample = gst_app_sink_pull_sample(GST_APP_SINK(cam.sink));
         if (!sample) continue;
 
         auto buffer = gst_sample_get_buffer(sample);
@@ -256,8 +361,8 @@ void captureThread(GstElement* sink)
         cv::Mat frame(h, w, CV_8UC3, map.data);
 
         {
-            std::lock_guard<std::mutex> lock(frameMutex);
-            latestFrame = frame.clone();
+            std::lock_guard<std::mutex> lock(cam.frameMutex);
+            cam.latestFrame = frame.clone();
         }
 
         gst_buffer_unmap(buffer, &map);
@@ -266,88 +371,53 @@ void captureThread(GstElement* sink)
 }
 
 // ============================================================
-// CAMERA -> WORLD
+// CALIBRATION  (per camera, called from tracking thread)
 // ============================================================
 
-static cv::Point3f camToWorld(const cv::Mat& tvec)
-{
-    if (R_wc.empty() || t_wc.empty()) return {0, 0, 0};
-    cv::Mat p = R_wc * tvec + t_wc;
-    return { (float)p.at<double>(0),
-             (float)p.at<double>(1),
-             (float)p.at<double>(2) };
-}
-
-// ============================================================
-// CALIBRATION
-// ============================================================
-
-static bool calibrate(
+static bool calibrateCamera(
+    CameraContext& cam,
     std::vector<cv::Point2f>& imgPts,
     std::vector<cv::Point3f>& objPts)
 {
     if (imgPts.size() < 8) return false;
 
     cv::Mat rvec;
-    cv::solvePnP(objPts, imgPts, K, D, rvec, t_wc);
-    cv::Rodrigues(rvec, R_wc);
-    calibrated = true;
-    std::cerr << "[INFO] Calibration successful\n";
+    cv::solvePnP(objPts, imgPts, cam.K, cam.D, rvec, cam.t_wc);
+    cv::Rodrigues(rvec, cam.R_wc);
+    cam.calibrated = true;
+
+    std::cerr << "[INFO] Camera " << cam.id
+              << " calibrated (" << imgPts.size() << " pts)\n";
     return true;
 }
 
 // ============================================================
-// JSON HELPERS
+// PER-CAMERA TRACKING THREAD
 // ============================================================
 
-// Fixed-precision double -> string (avoids locale issues with printf)
-static std::string fp(double v, int prec = 4)
-{
-    std::ostringstream oss;
-    oss << std::fixed << std::setprecision(prec) << v;
-    return oss.str();
-}
-
-static std::string tagJson(const std::string& key, const TagState& ts)
-{
-    return "\"" + key + "\":{"
-        "\"x\":"          + fp(ts.pose.x)    +
-        ",\"y\":"         + fp(ts.pose.y)     +
-        ",\"yaw\":"       + fp(ts.pose.yaw)   +
-        ",\"conf\":"      + fp(ts.confidence, 3) +
-        ",\"visible\":"   + (ts.visible ? "true" : "false") +
-        "}";
-}
-
-// ============================================================
-// TRACKING THREAD
-// ============================================================
-
-void trackingThread()
+void trackingThread(CameraContext& cam)
 {
     auto detector = createDetector();
 
-    // 3-D corners for a tracking tag (in tag-local frame, z=0)
     const std::vector<cv::Point3f> trackObj =
     {
-        {-TAG_SIZE/2, -TAG_SIZE/2, 0},
-        { TAG_SIZE/2, -TAG_SIZE/2, 0},
-        { TAG_SIZE/2,  TAG_SIZE/2, 0},
-        {-TAG_SIZE/2,  TAG_SIZE/2, 0}
+        {-(float)TAG_SIZE/2, -(float)TAG_SIZE/2, 0},
+        { (float)TAG_SIZE/2, -(float)TAG_SIZE/2, 0},
+        { (float)TAG_SIZE/2,  (float)TAG_SIZE/2, 0},
+        {-(float)TAG_SIZE/2,  (float)TAG_SIZE/2, 0}
     };
 
     while (running)
     {
         cv::Mat frame;
         {
-            std::lock_guard<std::mutex> lock(frameMutex);
-            if (latestFrame.empty()) continue;
-            frame = latestFrame.clone();
+            std::lock_guard<std::mutex> lock(cam.frameMutex);
+            if (cam.latestFrame.empty()) continue;
+            frame = cam.latestFrame.clone();
         }
 
         ++frameCounter;
 
-        // --- Greyscale conversion ---
         cv::Mat gray;
         cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
 
@@ -358,38 +428,32 @@ void trackingThread()
 
         auto detections = apriltag_detector_detect(detector, &img);
 
-        // Collect calibration correspondences
         std::vector<cv::Point2f> calibImg;
         std::vector<cv::Point3f> calibObj;
 
-        // Reset visibility each frame
         TagState new0, new1;
-        {
-            std::lock_guard<std::mutex> lock(poseMutex);
-            new0 = tag0State;  new0.visible = false;
-            new1 = tag1State;  new1.visible = false;
-        }
+        new0.visible = false;
+        new1.visible = false;
 
         for (int i = 0; i < zarray_size(detections); ++i)
         {
             apriltag_detection_t* det;
             zarray_get(detections, i, &det);
 
-            // Skip very low-quality detections early
             if (det->hamming > 1) continue;
 
-            // --- Calibration tag corners ---
+            // --- Calibration corners ---
             if (worldTagCorners.count(det->id))
             {
                 for (int k = 0; k < 4; ++k)
                 {
                     calibImg.emplace_back(det->p[k][0], det->p[k][1]);
-                    calibObj.push_back(worldTagCorners[det->id][k]);
+                    calibObj.push_back(worldTagCorners.at(det->id)[k]);
                 }
             }
 
             // --- Tracking tags ---
-            if (calibrated &&
+            if (cam.calibrated &&
                 (det->id == TRACK_TAG0 || det->id == TRACK_TAG1))
             {
                 std::vector<cv::Point2f> imgPts;
@@ -397,15 +461,13 @@ void trackingThread()
                     imgPts.emplace_back(det->p[k][0], det->p[k][1]);
 
                 cv::Mat rvec, tvec;
-                cv::solvePnP(trackObj, imgPts, K, D, rvec, tvec);
+                cv::solvePnP(trackObj, imgPts, cam.K, cam.D, rvec, tvec);
 
-                // Confidence score (uses rvec/tvec from solvePnP)
-                double conf = computeConfidence(det, rvec, tvec, trackObj, imgPts);
+                double conf = computeConfidence(
+                    det, rvec, tvec, trackObj, imgPts, cam.K, cam.D);
 
-                // World position
-                auto world = camToWorld(tvec);
+                auto world = camToWorld(tvec, cam.R_wc, cam.t_wc);
 
-                // Yaw from rotation matrix
                 cv::Mat R;
                 cv::Rodrigues(rvec, R);
                 double yaw = std::atan2(R.at<double>(1, 0),
@@ -421,91 +483,201 @@ void trackingThread()
             }
         }
 
-        // Run calibration if not done yet
-        if (!calibrated)
-            calibrate(calibImg, calibObj);
+        if (!cam.calibrated)
+            calibrateCamera(cam, calibImg, calibObj);
 
         {
-            std::lock_guard<std::mutex> lock(poseMutex);
-            tag0State = new0;
-            tag1State = new1;
+            std::lock_guard<std::mutex> lock(cam.obsMutex);
+            cam.tag0obs = new0;
+            cam.tag1obs = new1;
         }
 
         apriltag_detections_destroy(detections);
+    }
+}
 
-        // --- JSON output (stderr stays clean for logs) ---
+// ============================================================
+// FUSION + JSON OUTPUT THREAD
+//
+// Reads latest observations from both cameras, picks the
+// higher-confidence estimate for each tag, writes fused state
+// and emits one JSON line per iteration (~100 Hz).
+// ============================================================
+
+void fusionThread()
+{
+    while (running)
+    {
+        // Snapshot observations from both cameras
+        TagState obs[2][2];   // obs[camIdx][tagIdx 0/1]
+        for (int c = 0; c < 2; ++c)
+        {
+            std::lock_guard<std::mutex> lock(cameras[c].obsMutex);
+            obs[c][0] = cameras[c].tag0obs;
+            obs[c][1] = cameras[c].tag1obs;
+        }
+
+        // Fuse each tracking tag: prefer higher confidence
+        auto fuse = [&](int tagIdx) -> TagState
+        {
+            const TagState& a = obs[0][tagIdx];
+            const TagState& b = obs[1][tagIdx];
+
+            if ( a.visible && !b.visible) return a;
+            if (!a.visible &&  b.visible) return b;
+            if (!a.visible && !b.visible) return {};
+
+            // Both visible: pick higher confidence winner
+            return (a.confidence >= b.confidence) ? a : b;
+        };
+
+        TagState f0 = fuse(0);
+        TagState f1 = fuse(1);
+
+        {
+            std::lock_guard<std::mutex> lock(fusedMutex);
+            fusedTag0 = f0;
+            fusedTag1 = f1;
+        }
+
+        // --- JSON helpers ---
+        auto fp = [](double v, int p = 4) -> std::string
+        {
+            std::ostringstream oss;
+            oss << std::fixed << std::setprecision(p) << v;
+            return oss.str();
+        };
+
+        auto camDiag = [&](const TagState& ts) -> std::string
+        {
+            return "{\"conf\":"    + fp(ts.confidence, 3) +
+                   ",\"visible\":" + (ts.visible ? "true" : "false") +
+                   "}";
+        };
+
+        auto tagJson = [&](const std::string& key,
+                           const TagState& fused,
+                           int tagIdx) -> std::string
+        {
+            return "\"" + key + "\":{"
+                "\"x\":"        + fp(fused.pose.x)       +
+                ",\"y\":"       + fp(fused.pose.y)        +
+                ",\"yaw\":"     + fp(fused.pose.yaw)      +
+                ",\"conf\":"    + fp(fused.confidence, 3) +
+                ",\"visible\":" + (fused.visible ? "true" : "false") +
+                ",\"camA\":"    + camDiag(obs[0][tagIdx]) +
+                ",\"camB\":"    + camDiag(obs[1][tagIdx]) +
+                "}";
+        };
+
         auto ts_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
 
-        TagState s0, s1;
-        {
-            std::lock_guard<std::mutex> lock(poseMutex);
-            s0 = tag0State;
-            s1 = tag1State;
-        }
-
         std::cout
             << "{"
-            << "\"ts\":"    << ts_ns
-            << ",\"frame\":" << frameCounter
-            << ","           << tagJson("tag0", s0)
-            << ","           << tagJson("tag1", s1)
+            << "\"ts\":"     << ts_ns
+            << ",\"frame\":" << frameCounter.load()
+            << ",\"calA\":"  << (cameras[0].calibrated ? "true" : "false")
+            << ",\"calB\":"  << (cameras[1].calibrated ? "true" : "false")
+            << ","           << tagJson("tag0", f0, 0)
+            << ","           << tagJson("tag1", f1, 1)
             << "}\n";
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 }
 
 // ============================================================
 // VISUALIZATION THREAD
+// Both camera feeds side-by-side with per-camera and fused info
 // ============================================================
 
 void visThread()
 {
     cv::namedWindow("Tracking", cv::WINDOW_NORMAL);
-    cv::resizeWindow("Tracking", DISPLAY_W, DISPLAY_H);
+    cv::resizeWindow("Tracking", DISPLAY_W * 2, DISPLAY_H);
 
     while (running)
     {
-        cv::Mat frame;
+        std::array<cv::Mat, 2> frames;
+        for (int c = 0; c < 2; ++c)
         {
-            std::lock_guard<std::mutex> lock(frameMutex);
-            if (latestFrame.empty()) continue;
-            frame = latestFrame.clone();
+            std::lock_guard<std::mutex> lock(cameras[c].frameMutex);
+            if (cameras[c].latestFrame.empty())
+                frames[c] = cv::Mat::zeros(DISPLAY_H, DISPLAY_W, CV_8UC3);
+            else
+                cv::resize(cameras[c].latestFrame, frames[c],
+                           cv::Size(DISPLAY_W, DISPLAY_H));
         }
-
-        cv::resize(frame, frame, cv::Size(DISPLAY_W, DISPLAY_H));
 
         TagState s0, s1;
         {
-            std::lock_guard<std::mutex> lock(poseMutex);
-            s0 = tag0State;
-            s1 = tag1State;
+            std::lock_guard<std::mutex> lock(fusedMutex);
+            s0 = fusedTag0;
+            s1 = fusedTag1;
         }
 
-        auto drawTag = [&](const TagState& ts, const std::string& label,
-                           int y, cv::Scalar colour)
+        // --- Per-camera overlay ---
+        for (int c = 0; c < 2; ++c)
         {
-            std::string vis = ts.visible ? "" : " [lost]";
-            std::string txt = label
-                + " x=" + std::to_string(ts.pose.x).substr(0,6)
-                + " y=" + std::to_string(ts.pose.y).substr(0,6)
-                + " yaw=" + std::to_string((int)ts.pose.yaw)
-                + " conf=" + std::to_string(ts.confidence).substr(0,4)
-                + vis;
-            cv::putText(frame, txt, {40, y},
-                        cv::FONT_HERSHEY_SIMPLEX, 1.1, colour, 2);
+            cv::Mat& f = frames[c];
+
+            cv::putText(f, "CAM " + std::string(c == 0 ? "A" : "B"),
+                        {20, 40}, cv::FONT_HERSHEY_SIMPLEX, 1.3,
+                        {200, 200, 200}, 2);
+
+            bool cal = cameras[c].calibrated.load();
+            cv::putText(f, cal ? "CAL OK" : "CALIBRATING",
+                        {20, 80}, cv::FONT_HERSHEY_SIMPLEX, 0.9,
+                        cal ? cv::Scalar(0, 220, 80) : cv::Scalar(0, 80, 220), 2);
+
+            TagState camObs[2];
+            {
+                std::lock_guard<std::mutex> lock(cameras[c].obsMutex);
+                camObs[0] = cameras[c].tag0obs;
+                camObs[1] = cameras[c].tag1obs;
+            }
+
+            auto obsLine = [&](const TagState& ts,
+                               const std::string& lbl, int y, cv::Scalar col)
+            {
+                std::ostringstream oss;
+                oss << lbl << (ts.visible ? "" : " [--]")
+                    << " cf=" << std::fixed << std::setprecision(2)
+                    << ts.confidence;
+                cv::putText(f, oss.str(), {20, y},
+                            cv::FONT_HERSHEY_SIMPLEX, 0.85, col, 2);
+            };
+
+            obsLine(camObs[0], "T0", 120, {80,  255,  80});
+            obsLine(camObs[1], "T1", 155, {80,  140, 255});
+        }
+
+        // --- Fused overlay on left pane ---
+        auto fusedLine = [&](const TagState& ts,
+                              const std::string& lbl, int y, cv::Scalar col)
+        {
+            std::ostringstream oss;
+            oss << "[FUSED] " << lbl;
+            if (ts.visible)
+                oss << " x=" << std::fixed << std::setprecision(3) << ts.pose.x
+                    << " y=" << ts.pose.y
+                    << " yaw=" << std::setprecision(1) << ts.pose.yaw
+                    << " cf=" << std::setprecision(2) << ts.confidence;
+            else
+                oss << " [lost]";
+            cv::putText(frames[0], oss.str(), {20, y},
+                        cv::FONT_HERSHEY_SIMPLEX, 0.85, col, 2);
         };
 
-        drawTag(s0, "Tag0", 50,  {0, 255,   0});
-        drawTag(s1, "Tag1", 100, {0, 100, 255});
+        fusedLine(s0, "T0", 210, {0, 255, 130});
+        fusedLine(s1, "T1", 245, {0, 130, 255});
 
-        // Calibration status indicator
-        cv::putText(frame,
-            calibrated ? "CAL OK" : "CALIBRATING...",
-            {40, 150},
-            cv::FONT_HERSHEY_SIMPLEX, 1.0,
-            calibrated ? cv::Scalar(0,255,100) : cv::Scalar(0,100,255), 2);
+        // Side-by-side
+        cv::Mat composite;
+        cv::hconcat(frames[0], frames[1], composite);
+        cv::imshow("Tracking", composite);
 
-        cv::imshow("Tracking", frame);
         if (cv::waitKey(1) == 'q') running = false;
     }
 }
@@ -518,41 +690,59 @@ int main(int argc, char** argv)
 {
     gst_init(&argc, &argv);
 
-    // NOTE: resolution_divider is a C++ constexpr, not a GStreamer variable.
-    // The pipeline string must use the computed literal values.
-    const int cam_w = 4056 / resolution_divider;
-    const int cam_h = 3040 / resolution_divider;
+    // Initialise camera contexts
+    cameras[0].id     = 0;
+    cameras[0].device = CAM_DEVICE_A;
+    cameras[0].K      = makeK();
+    cameras[0].D      = makeD();
 
-    std::string pipeline =
-        "libcamerasrc ! "
-        "video/x-raw,width=" + std::to_string(cam_w) +
-        ",height="           + std::to_string(cam_h) +
-        ",format=BGRx ! "
-        "videoconvert ! "
-        "video/x-raw,format=BGR ! "
-        "appsink name=sink max-buffers=1 drop=true";
+    cameras[1].id     = 1;
+    cameras[1].device = CAM_DEVICE_B;
+    cameras[1].K      = makeK();
+    cameras[1].D      = makeD();
 
-    GError* err = nullptr;
-    auto pipe = gst_parse_launch(pipeline.c_str(), &err);
-    if (!pipe || err)
+    // Build and start GStreamer pipelines
+    for (int c = 0; c < 2; ++c)
     {
-        std::cerr << "[ERROR] GStreamer pipeline: "
-                  << (err ? err->message : "unknown") << "\n";
-        return 1;
+        GError* gerr = nullptr;
+        std::string pipeStr = buildPipeline(cameras[c].device);
+
+        cameras[c].pipeline = gst_parse_launch(pipeStr.c_str(), &gerr);
+        if (!cameras[c].pipeline || gerr)
+        {
+            std::cerr << "[ERROR] Camera " << c << " pipeline: "
+                      << (gerr ? gerr->message : "unknown") << "\n";
+            return 1;
+        }
+
+        cameras[c].sink =
+            gst_bin_get_by_name(GST_BIN(cameras[c].pipeline), "sink");
+
+        gst_element_set_state(cameras[c].pipeline, GST_STATE_PLAYING);
+        std::cerr << "[INFO] Camera " << c
+                  << " pipeline started (" << cameras[c].device << ")\n";
     }
 
-    auto sink = gst_bin_get_by_name(GST_BIN(pipe), "sink");
-    gst_element_set_state(pipe, GST_STATE_PLAYING);
+    // Launch threads:  2x capture  +  2x tracking  +  fusion  +  vis
+    std::thread capA   (captureThread,  std::ref(cameras[0]));
+    std::thread capB   (captureThread,  std::ref(cameras[1]));
+    std::thread trackA (trackingThread, std::ref(cameras[0]));
+    std::thread trackB (trackingThread, std::ref(cameras[1]));
+    std::thread fusion (fusionThread);
+    std::thread vis    (visThread);
 
-    std::thread cap  (captureThread, sink);
-    std::thread track(trackingThread);
-    std::thread vis  (visThread);
-
-    cap.join();
-    track.join();
+    capA.join();
+    capB.join();
+    trackA.join();
+    trackB.join();
+    fusion.join();
     vis.join();
 
-    gst_element_set_state(pipe, GST_STATE_NULL);
-    gst_object_unref(pipe);
+    for (int c = 0; c < 2; ++c)
+    {
+        gst_element_set_state(cameras[c].pipeline, GST_STATE_NULL);
+        gst_object_unref(cameras[c].pipeline);
+    }
+
     return 0;
 }
