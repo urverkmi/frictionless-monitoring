@@ -12,6 +12,9 @@
 //      single visible estimate is used.
 //    - Each JSON line on stdout contains the fused pose + per-
 //      camera visibility & confidence for diagnostics.
+//    - When both tracking tags are visible, one Detector Contract
+//      JSON datagram is sent to UDP 127.0.0.1:9001 for the Python
+//      bridge (docs/api.md).
 //
 //  Calibration rectangle corner IDs and world positions
 //  (origin = centre, X = long axis, Y = short axis, Z up):
@@ -41,6 +44,13 @@
 #include <iomanip>
 #include <cmath>
 #include <chrono>
+#include <algorithm>
+#include <cstring>
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <opencv2/opencv.hpp>
 
@@ -87,9 +97,12 @@ constexpr double MARGIN_SAT         = 80.0;    // maps to conf=1
 constexpr double SIZE_SAT           = 200.0;   // px diagonal -> conf=1
 constexpr double REPROJ_MAX         = 5.0;     // px error   -> conf=0
 
-// GStreamer camera device identifiers (adjust to your system)
-const std::string CAM_DEVICE_A = "/dev/video0";
-const std::string CAM_DEVICE_B = "/dev/video1";
+const std::string CAM_DEVICE_A = "/base/axi/pcie@1000120000/rp1/i2c@88000/imx477@1a";
+const std::string CAM_DEVICE_B = "/base/axi/pcie@1000120000/rp1/i2c@80000/imx477@1a";
+
+// UDP sink for Python cpp_stream_bridge (must match docs/api.md)
+constexpr const char* DETECTOR_UDP_HOST = "127.0.0.1";
+constexpr uint16_t  DETECTOR_UDP_PORT  = 9001;
 
 // ============================================================
 // CAMERA INTRINSICS  (same sensor assumed; scale by divider)
@@ -323,17 +336,12 @@ static apriltag_detector_t* createDetector()
 
 static std::string buildPipeline(const std::string& device)
 {
-    const int cam_w = 4056 / RESOLUTION_DIVIDER;
-    const int cam_h = 3040 / RESOLUTION_DIVIDER;
-
     return
         "libcamerasrc camera-name=" + device + " ! "
-        "video/x-raw,width="  + std::to_string(cam_w) +
-        ",height=" + std::to_string(cam_h) +
-        ",format=BGRx ! "
         "videoconvert ! "
         "video/x-raw,format=BGR ! "
-        "appsink name=sink max-buffers=1 drop=true";
+        // Keep only freshest frame and do not sync to clock.
+        "appsink name=sink max-buffers=1 drop=true sync=false";
 }
 
 // ============================================================
@@ -502,10 +510,27 @@ void trackingThread(CameraContext& cam)
 // Reads latest observations from both cameras, picks the
 // higher-confidence estimate for each tag, writes fused state
 // and emits one JSON line per iteration (~100 Hz).
+// When both tags are visible, also sends one Detector Contract
+// JSON datagram per iteration to UDP localhost:9001.
 // ============================================================
 
 void fusionThread()
 {
+    int udpFd = socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in udpAddr{};
+    if (udpFd >= 0)
+    {
+        udpAddr.sin_family = AF_INET;
+        udpAddr.sin_port   = htons(DETECTOR_UDP_PORT);
+        if (inet_pton(AF_INET, DETECTOR_UDP_HOST, &udpAddr.sin_addr) != 1)
+        {
+            close(udpFd);
+            udpFd = -1;
+        }
+    }
+    if (udpFd < 0)
+        std::cerr << "[WARN] detector UDP socket unavailable; start Python bridge before vision\n";
+
     while (running)
     {
         // Snapshot observations from both cameras
@@ -538,6 +563,47 @@ void fusionThread()
             std::lock_guard<std::mutex> lock(fusedMutex);
             fusedTag0 = f0;
             fusedTag1 = f1;
+        }
+
+        // --- Detector contract -> Python (UDP), docs/api.md ---
+        if (udpFd >= 0 && f0.visible && f1.visible)
+        {
+            const auto wallNow = std::chrono::system_clock::now();
+            const double tsSec = std::chrono::duration<double>(
+                                     wallNow.time_since_epoch())
+                                     .count();
+
+            const double dx = f1.pose.x - f0.pose.x;
+            const double dy = f1.pose.y - f0.pose.y;
+            double orbit = std::atan2(dy, dx);
+            if (orbit < 0.0)
+                orbit += 2.0 * std::acos(-1.0);
+
+            const double trackConf =
+                std::min(f0.confidence, f1.confidence);
+
+            std::ostringstream det;
+            det.setf(std::ios::fixed);
+            det << std::setprecision(6)
+                << "{\"timestamp\":" << tsSec
+                << ",\"frame_id\":" << frameCounter.load()
+                << ",\"camera_id\":\"fused\""
+                << ",\"satellite_position\":{\"x\":" << f0.pose.x
+                << ",\"y\":" << f0.pose.y << '}'
+                << ",\"end_mass_position\":{\"x\":" << f1.pose.x
+                << ",\"y\":" << f1.pose.y << '}'
+                << ",\"orbital_angular_position\":" << orbit
+                << ",\"tracking_confidence\":";
+            det << std::setprecision(4) << trackConf << '}';
+
+            const std::string detStr = det.str();
+            (void)sendto(
+                udpFd,
+                detStr.data(),
+                detStr.size(),
+                0,
+                reinterpret_cast<const sockaddr*>(&udpAddr),
+                static_cast<socklen_t>(sizeof(udpAddr)));
         }
 
         // --- JSON helpers ---
@@ -585,6 +651,9 @@ void fusionThread()
 
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+
+    if (udpFd >= 0)
+        close(udpFd);
 }
 
 // ============================================================
@@ -689,6 +758,12 @@ void visThread()
 int main(int argc, char** argv)
 {
     gst_init(&argc, &argv);
+    bool enableVis = true;
+    for (int i = 1; i < argc; ++i)
+    {
+        if (std::strcmp(argv[i], "--no-vis") == 0)
+            enableVis = false;
+    }
 
     // Initialise camera contexts
     cameras[0].id     = 0;
@@ -723,20 +798,25 @@ int main(int argc, char** argv)
                   << " pipeline started (" << cameras[c].device << ")\n";
     }
 
-    // Launch threads:  2x capture  +  2x tracking  +  fusion  +  vis
+    // Launch threads:  2x capture  +  2x tracking  +  fusion  +  optional vis
     std::thread capA   (captureThread,  std::ref(cameras[0]));
     std::thread capB   (captureThread,  std::ref(cameras[1]));
     std::thread trackA (trackingThread, std::ref(cameras[0]));
     std::thread trackB (trackingThread, std::ref(cameras[1]));
     std::thread fusion (fusionThread);
-    std::thread vis    (visThread);
+    std::thread vis;
+    if (enableVis)
+        vis = std::thread(visThread);
+    else
+        std::cerr << "[INFO] Visualization disabled (--no-vis)\n";
 
     capA.join();
     capB.join();
     trackA.join();
     trackB.join();
     fusion.join();
-    vis.join();
+    if (vis.joinable())
+        vis.join();
 
     for (int c = 0; c < 2; ++c)
     {

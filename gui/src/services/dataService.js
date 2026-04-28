@@ -1,5 +1,5 @@
 // Configuration
-// DATA_PORT must match the WebSocket server in Python (e.g. FakeDataStream.py)
+// DATA_PORT must match cpp_stream_bridge.py WebSocket (default 8080)
 const DATA_PORT = 8080;
 // When false, connect to real WebSocket stream instead of local mock generator
 const USE_MOCK_DATA = false; // Set to false when real data is available

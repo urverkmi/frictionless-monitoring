@@ -41,21 +41,22 @@ class FrameData:
     
     # Position (pixels or calibrated units)
     position: Vector2D
-    tether_length: float = 0.0
-    
+
     # Velocity (units/second)
     velocity: Vector2D
-    
+
     # Acceleration (units/second²)
     acceleration: Vector2D
-    
+
     # Rotational data
     angular_position: float  # radians from reference
     angular_velocity: float  # rad/s
     angular_acceleration: float  # rad/s²
-    
+
     # Quality metrics
     tracking_confidence: float  # 0.0 to 1.0
+
+    tether_length: float = 0.0
     detection_quality: Optional[str] = None  # 'good', 'medium', 'poor'
     
     def to_dict(self) -> dict:

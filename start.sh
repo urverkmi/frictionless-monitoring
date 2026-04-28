@@ -9,11 +9,20 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$REPO_DIR/logs"
 mkdir -p "$LOG_DIR"
 
+# Prefer project virtualenv when available.
+if [[ -x "$REPO_DIR/venv/bin/python3" ]]; then
+  PYTHON_BIN="$REPO_DIR/venv/bin/python3"
+  PIP_CMD=( "$PYTHON_BIN" -m pip )
+else
+  PYTHON_BIN="python3"
+  PIP_CMD=( pip3 )
+fi
+
 # ── Kill any stale processes left from a previous run ──
 pkill -f "pcb_simulator.py"  2>/dev/null || true
 pkill -f "esp32_simulator.py" 2>/dev/null || true
 pkill -f "controller_app.py" 2>/dev/null || true
-pkill -f "FakeDataStream.py" 2>/dev/null || true
+pkill -f "cpp_stream_bridge.py" 2>/dev/null || true
 pkill -f "tail.*$LOG_DIR"    2>/dev/null || true
 # Kill processes on ports (cross-platform: fuser on Linux, lsof on macOS)
 kill_port() {
@@ -33,7 +42,8 @@ sleep 1
 > "$LOG_DIR/react.log"
 > "$LOG_DIR/simulator.log"
 > "$LOG_DIR/esp32_sim.log"
-> "$LOG_DIR/fakedata.log"
+> "$LOG_DIR/bridge.log"
+> "$LOG_DIR/vision.log"
 
 echo "════════════════════════════════════════"
 echo "  Aurora Plasma Brake Monitor"
@@ -49,7 +59,7 @@ fi
 cleanup() {
   echo ""
   echo "Shutting down..."
-  kill "${SIM_PID:-}" "${ESP32_SIM_PID:-}" "$FLASK_PID" "${FAKEDATA_PID:-}" "$REACT_PID" "$TAIL_PID" 2>/dev/null
+  kill "${SIM_PID:-}" "${ESP32_SIM_PID:-}" "$FLASK_PID" "${BRIDGE_PID:-}" "${VISION_PID:-}" "$REACT_PID" "$TAIL_PID" 2>/dev/null
   wait 2>/dev/null
   exit 0
 }
@@ -57,34 +67,49 @@ trap cleanup SIGINT SIGTERM
 
 # ── 1. Python dependencies ───────────────────
 echo "[1/3] Installing Python dependencies..."
-pip3 install -r "$REPO_DIR/requirements.txt" --quiet --break-system-packages
+if "${PIP_CMD[@]}" install --help 2>/dev/null | grep -q -- "--break-system-packages"; then
+  "${PIP_CMD[@]}" install -r "$REPO_DIR/requirements.txt" --quiet --break-system-packages
+else
+  "${PIP_CMD[@]}" install -r "$REPO_DIR/requirements.txt" --quiet
+fi
 
 # ── 2. Start simulator first so virtual ports exist ──
 if [ "$SIM_MODE" = true ]; then
   echo "[2/3] Starting PCB simulator..."
-  (cd "$REPO_DIR/src/controller" && python3 -u pcb_simulator.py >> "$LOG_DIR/simulator.log" 2>&1) &
+  (cd "$REPO_DIR/src/controller" && "$PYTHON_BIN" -u pcb_simulator.py >> "$LOG_DIR/simulator.log" 2>&1) &
   SIM_PID=$!
   sleep 3
 
   echo "      Starting ESP32 simulator..."
-  (cd "$REPO_DIR/src/controller" && python3 -u esp32_simulator.py >> "$LOG_DIR/esp32_sim.log" 2>&1) &
+  (cd "$REPO_DIR/src/controller" && "$PYTHON_BIN" -u esp32_simulator.py >> "$LOG_DIR/esp32_sim.log" 2>&1) &
   ESP32_SIM_PID=$!
   sleep 2
 fi
 
 # ── 3. Start Flask backend ───────────────────
 echo "[3/3] Starting Flask backend (port 5001)..."
-(cd "$REPO_DIR/src/controller" && python3 controller_app.py >> "$LOG_DIR/flask.log" 2>&1) &
+(cd "$REPO_DIR/src/controller" && "$PYTHON_BIN" controller_app.py >> "$LOG_DIR/flask.log" 2>&1) &
 FLASK_PID=$!
 sleep 2
 
-# ── 4. Start FakeDataStream WebSocket server ─
-echo "      Starting data stream (port 8080)..."
-(cd "$REPO_DIR/src/camera" && python3 -u FakeDataStream.py >> "$LOG_DIR/fakedata.log" 2>&1) &
-FAKEDATA_PID=$!
+# ── 4. Detector bridge: UDP (C++ vision) -> WebSocket (GUI) ─
+echo "      Starting cpp_stream_bridge (UDP 9001 -> ws 8080)..."
+("$PYTHON_BIN" -u "$REPO_DIR/src/camera/cpp_stream_bridge.py" >> "$LOG_DIR/bridge.log" 2>&1) &
+BRIDGE_PID=$!
 sleep 1
 
-# ── 5. Start React frontend ──────────────────
+# ── 5. AprilTag vision (optional; Pi / built binary) ─
+VISION_BIN="$REPO_DIR/vision/build/apriltag_demo"
+if [[ -x "$VISION_BIN" ]]; then
+  echo "      Starting AprilTag vision (--no-vis)..."
+  ("$VISION_BIN" --no-vis >> "$LOG_DIR/vision.log" 2>&1) &
+  VISION_PID=$!
+  sleep 1
+else
+  echo "      (Vision binary not found: $VISION_BIN — build vision/ or run it on the Pi)"
+fi
+
+# ── 6. Start React frontend ──────────────────
 echo "      Starting React frontend (port 3000)..."
 if [ ! -d "$REPO_DIR/gui/node_modules" ]; then
   echo "      node_modules not found — running npm install..."
@@ -105,10 +130,12 @@ fi
 echo "════════════════════════════════════════"
 echo "  ✓ Backend:   http://localhost:5001"
 echo "  ✓ Frontend:  http://localhost:3000"
+echo "  ✓ Data:      ws://localhost:8080 (from C++ via cpp_stream_bridge)"
 echo ""
 echo "  Full logs (other terminal):"
 echo "    tail -f logs/flask.log"
-echo "    tail -f logs/fakedata.log"
+echo "    tail -f logs/bridge.log"
+echo "    tail -f logs/vision.log"
 echo "    tail -f logs/react.log"
 echo "  Press Ctrl+C to stop everything."
 echo "════════════════════════════════════════"

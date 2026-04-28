@@ -18,7 +18,7 @@ include_directories(
 )
 
 add_executable(apriltag_demo
-    src/main.cpp
+    main.cpp
 )
 
 target_link_libraries(apriltag_demo

@@ -9,6 +9,7 @@ import struct
 import crcmod
 import threading
 import time
+from typing import Optional
 from flask import Flask, render_template_string, jsonify, request
 from flask_cors import CORS
 
@@ -140,7 +141,7 @@ class ESP32Connection:
             self._ser = None
             return False
 
-    def send(self, command: str) -> str | None:
+    def send(self, command: str) -> Optional[str]:
         """Send a text command and return None (responses handled by listener)."""
         with self._lock:
             if not self.connect():
