@@ -112,7 +112,11 @@ sleep 1
 VISION_BIN="$REPO_DIR/vision/build/apriltag_demo"
 if [[ -x "$VISION_BIN" ]]; then
   echo "      Starting AprilTag vision (--no-vis)..."
-  ("$VISION_BIN" --no-vis >> "$LOG_DIR/vision.log" 2>&1) &
+  if command -v stdbuf >/dev/null 2>&1; then
+    (stdbuf -oL -eL "$VISION_BIN" --no-vis >> "$LOG_DIR/vision.log" 2>&1) &
+  else
+    ("$VISION_BIN" --no-vis >> "$LOG_DIR/vision.log" 2>&1) &
+  fi
   VISION_PID=$!
   sleep 1
 else
