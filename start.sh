@@ -9,6 +9,16 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$REPO_DIR/logs"
 mkdir -p "$LOG_DIR"
 
+# On Raspberry Pi over SSH, GUI/camera preview often needs explicit X11 env.
+# Keep this Linux-only so local macOS runs are unaffected.
+if [[ "$(uname -s)" == "Linux" ]]; then
+  : "${DISPLAY:=:0}"
+  if [[ -z "${XAUTHORITY:-}" && -f "/home/auroracv/.Xauthority" ]]; then
+    export XAUTHORITY="/home/auroracv/.Xauthority"
+  fi
+  export DISPLAY
+fi
+
 # Prefer project virtualenv when available.
 if [[ -x "$REPO_DIR/venv/bin/python3" ]]; then
   PYTHON_BIN="$REPO_DIR/venv/bin/python3"
