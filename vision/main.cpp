@@ -36,6 +36,7 @@
 #include <string>
 #include <sstream>
 #include <iomanip>
+<<<<<<< Updated upstream
 #include <cmath>
 #include <chrono>
 #include <algorithm>
@@ -46,6 +47,11 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+=======
+#include <string>
+
+#include <arpa/inet.h>
+>>>>>>> Stashed changes
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -381,10 +387,72 @@ static bool calibrateCamera(
 // TRACKING THREAD  — reads frames, runs detector
 // ============================================================
 
+<<<<<<< Updated upstream
 void trackingThread(CameraContext& cam, int core)
+=======
+// Fixed-precision double -> string (avoids locale issues with printf)
+static std::string fp(double v, int prec = 4)
+{
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(prec) << v;
+    return oss.str();
+}
+
+static std::string tagJson(const std::string& key, const TagState& ts)
+{
+    return "\"" + key + "\":{"
+        "\"x\":"          + fp(ts.pose.x)    +
+        ",\"y\":"         + fp(ts.pose.y)     +
+        ",\"yaw\":"       + fp(ts.pose.yaw)   +
+        ",\"conf\":"      + fp(ts.confidence, 3) +
+        ",\"visible\":"   + (ts.visible ? "true" : "false") +
+        "}";
+}
+
+static std::string detectorContractJson(
+    uint64_t frame_id,
+    const TagState& satellite,
+    const TagState& end_mass)
+{
+    // Orbital angle of end mass around satellite in [0, 2pi).
+    const double dx = end_mass.pose.x - satellite.pose.x;
+    const double dy = end_mass.pose.y - satellite.pose.y;
+    double orbital = std::atan2(dy, dx);
+    if (orbital < 0.0) orbital += 2.0 * CV_PI;
+
+    const double conf =
+        (satellite.visible && end_mass.visible)
+            ? 0.5 * (satellite.confidence + end_mass.confidence)
+            : 0.0;
+
+    auto ts_s = std::chrono::duration_cast<std::chrono::duration<double>>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    return "{"
+        "\"timestamp\":" + fp(ts_s, 6) +
+        ",\"frame_id\":" + std::to_string(frame_id) +
+        ",\"camera_id\":\"cam0\""
+        ",\"satellite_position\":{\"x\":" + fp(satellite.pose.x) + ",\"y\":" + fp(satellite.pose.y) + "}"
+        ",\"end_mass_position\":{\"x\":" + fp(end_mass.pose.x) + ",\"y\":" + fp(end_mass.pose.y) + "}"
+        ",\"orbital_angular_position\":" + fp(orbital, 6) +
+        ",\"tracking_confidence\":" + fp(conf, 3) +
+        "}";
+}
+
+// ============================================================
+// TRACKING THREAD
+// ============================================================
+
+void trackingThread()
+>>>>>>> Stashed changes
 {
     pinToCore(core);
     auto detector = createDetector();
+    int udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in udp_addr{};
+    udp_addr.sin_family = AF_INET;
+    udp_addr.sin_port = htons(9001);
+    udp_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
     const std::vector<cv::Point3f> trackObj =
     {
@@ -548,7 +616,38 @@ void trackingThread(CameraContext& cam, int core)
         }
 
         apriltag_detections_destroy(detections);
+<<<<<<< Updated upstream
+=======
+
+        // --- JSON output (stderr stays clean for logs) ---
+        auto ts_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+
+        TagState s0, s1;
+        {
+            std::lock_guard<std::mutex> lock(poseMutex);
+            s0 = tag0State;
+            s1 = tag1State;
+        }
+
+        std::cout
+            << "{"
+            << "\"ts\":"    << ts_ns
+            << ",\"frame\":" << frameCounter
+            << ","           << tagJson("tag0", s0)
+            << ","           << tagJson("tag1", s1)
+            << "}\n";
+
+        if (udp_sock >= 0)
+        {
+            const std::string msg = detectorContractJson(frameCounter.load(), s0, s1);
+            sendto(udp_sock, msg.c_str(), msg.size(), 0,
+                   reinterpret_cast<sockaddr*>(&udp_addr), sizeof(udp_addr));
+        }
+>>>>>>> Stashed changes
     }
+
+    if (udp_sock >= 0) close(udp_sock);
 }
 
 // ============================================================

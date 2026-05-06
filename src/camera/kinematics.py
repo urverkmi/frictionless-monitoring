@@ -27,7 +27,12 @@ class KinematicsCalculator:
         """
         self.memory_manager = memory_manager
         self.frame_data_buffer: List[FrameData] = []
-        pass
+        # Filters/noise guards for stable derivatives from jittery vision data.
+        self._vel_alpha = 0.25
+        self._omega_alpha = 0.25
+        self._stationary_pos_epsilon = 0.002  # world units (~2mm if meters)
+        self._filtered_velocity = Vector2D(0.0, 0.0)
+        self._filtered_omega = 0.0
 
     @staticmethod
     def _relative_position(position_data: dict) -> Vector2D:
@@ -171,12 +176,31 @@ class KinematicsCalculator:
             "position": self._relative_position(previous_pos),
         }
 
-        velocity = self.calculate_velocity(current_rel, previous_rel)
-        angular_velocity = self.calculate_angular_velocity(
+        raw_velocity = self.calculate_velocity(current_rel, previous_rel)
+        raw_angular_velocity = self.calculate_angular_velocity(
             self._orbital_angle(current_pos),
             self._orbital_angle(previous_pos),
             dt_vel,
         )
+        # Stationary deadband: suppress micro-jitter when tags are static.
+        rel_delta = Vector2D(
+            current_rel["position"].x - previous_rel["position"].x,
+            current_rel["position"].y - previous_rel["position"].y,
+        )
+        if rel_delta.magnitude() < self._stationary_pos_epsilon:
+            raw_velocity = Vector2D(0.0, 0.0)
+            raw_angular_velocity = 0.0
+
+        # Low-pass filter to reduce frame-to-frame derivative spikes.
+        a_v = self._vel_alpha
+        self._filtered_velocity = Vector2D(
+            x=(1.0 - a_v) * self._filtered_velocity.x + a_v * raw_velocity.x,
+            y=(1.0 - a_v) * self._filtered_velocity.y + a_v * raw_velocity.y,
+        )
+        a_w = self._omega_alpha
+        self._filtered_omega = (1.0 - a_w) * self._filtered_omega + a_w * raw_angular_velocity
+        velocity = self._filtered_velocity
+        angular_velocity = self._filtered_omega
 
         acceleration = Vector2D(0.0, 0.0)
         angular_acceleration = 0.0

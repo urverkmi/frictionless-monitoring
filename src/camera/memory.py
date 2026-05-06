@@ -32,7 +32,7 @@ class MemoryManager:
         
         Args:
             position_data: Dictionary from the active input source
-                          (e.g., C++ bridge, fake stream, or Python detector).
+                          (e.g., C++ bridge or Python detector).
                           Expected keys:
                           - timestamp
                           - frame_id

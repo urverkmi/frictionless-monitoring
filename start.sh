@@ -83,6 +83,16 @@ else
   "${PIP_CMD[@]}" install -r "$REPO_DIR/requirements.txt" --quiet
 fi
 
+# Ensure the interpreter used to run bridge has websockets installed.
+if ! "$PYTHON_BIN" -c "import websockets" >/dev/null 2>&1; then
+  echo "      Installing missing Python module: websockets"
+  if "${PIP_CMD[@]}" install --help 2>/dev/null | grep -q -- "--break-system-packages"; then
+    "${PIP_CMD[@]}" install websockets --quiet --break-system-packages
+  else
+    "${PIP_CMD[@]}" install websockets --quiet
+  fi
+fi
+
 # ── 2. Start simulator first so virtual ports exist ──
 if [ "$SIM_MODE" = true ]; then
   echo "[2/3] Starting PCB simulator..."

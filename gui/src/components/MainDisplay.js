@@ -2,140 +2,132 @@ import React, { useRef, useEffect } from 'react';
 
 function MainDisplay({ data }) {
   const canvasRef = useRef(null);
+  const viewRef = useRef(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const satellitePosition = data.satellitePosition || data.mainPosition;
-
     const ctx = canvas.getContext('2d');
+
+    // Use the actual pixel dimensions, not CSS dimensions
     const width = canvas.width;
     const height = canvas.height;
 
-    // Clear canvas
+    const satellitePosition = data.satellitePosition || data.mainPosition;
+    if (!satellitePosition || !data.endMassPosition) {
+      return;
+    }
+
+    const satWorld = { x: satellitePosition.x, y: satellitePosition.y };
+    const endWorld = { x: data.endMassPosition.x, y: data.endMassPosition.y };
+
+    // Reset view when positions change significantly (or on first frame)
+    const worldDistance = Math.hypot(
+      endWorld.x - satWorld.x,
+      endWorld.y - satWorld.y
+    );
+
+    // Guard: if the two objects are essentially the same point, skip rendering
+    if (worldDistance < 1e-6 && !data.tetherLength) {
+      return;
+    }
+
+    if (!viewRef.current) {
+      const centerX = (satWorld.x + endWorld.x) / 2;
+      const centerY = (satWorld.y + endWorld.y) / 2;
+
+      // Use tether length if available, otherwise use actual distance
+      // Multiply by 2.5 so both objects have comfortable margin
+      const refSpan = Math.max(
+        (data.tetherLength || worldDistance) * 2.5,
+        worldDistance * 2.5, // always fit the actual gap
+        0.1
+      );
+
+      const padding = 60;
+      const scale = Math.min(
+        (width - padding * 2) / refSpan,
+        (height - padding * 2) / refSpan
+      );
+
+      viewRef.current = { centerX, centerY, scale };
+    }
+
+    const { centerX, centerY, scale } = viewRef.current;
+    const originX = width / 2;
+    const originY = height / 2;
+
+    const worldToCanvas = (point) => ({
+      x: originX + (point.x - centerX) * scale,
+      y: originY - (point.y - centerY) * scale, // flip Y: world +Y is up
+    });
+
+    const sat = worldToCanvas(satWorld);
+    const end = worldToCanvas(endWorld);
+
+    // --- Clear ---
     ctx.fillStyle = '#0f172a';
     ctx.fillRect(0, 0, width, height);
 
-    // Draw grid
+    // --- Grid ---
     ctx.strokeStyle = '#1e293b';
     ctx.lineWidth = 1;
     const gridSize = 50;
     for (let x = 0; x < width; x += gridSize) {
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, height);
-      ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
     }
     for (let y = 0; y < height; y += gridSize) {
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(width, y);
-      ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
     }
 
-    // Center axes
+    // --- Center axes ---
     ctx.strokeStyle = '#334155';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(width / 2, 0);
-    ctx.lineTo(width / 2, height);
-    ctx.moveTo(0, height / 2);
-    ctx.lineTo(width, height / 2);
+    ctx.moveTo(width / 2, 0); ctx.lineTo(width / 2, height);
+    ctx.moveTo(0, height / 2); ctx.lineTo(width, height / 2);
     ctx.stroke();
 
-    // Transform to center origin
-    ctx.save();
-    ctx.translate(width / 2, height / 2);
+    // --- Debug: log canvas positions so you can verify ---
+    // console.log('sat canvas:', sat, 'end canvas:', end, 'scale:', scale);
 
-    // Draw tether (line connecting main unit to end mass)
+    // --- Tether ---
     ctx.strokeStyle = '#64748b';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(satellitePosition.x, satellitePosition.y);
-    ctx.lineTo(data.endMassPosition.x, data.endMassPosition.y);
+    ctx.moveTo(sat.x, sat.y);
+    ctx.lineTo(end.x, end.y);
     ctx.stroke();
 
-    // Draw main satellite unit (square)
-    const halfSize = data.mainSize / 2;
-    ctx.fillStyle = '#3b82f6';
-    ctx.strokeStyle = '#60a5fa';
-    ctx.lineWidth = 2;
-    ctx.fillRect(
-      satellitePosition.x - halfSize,
-      satellitePosition.y - halfSize,
-      data.mainSize,
-      data.mainSize
-    );
-    ctx.strokeRect(
-      satellitePosition.x - halfSize,
-      satellitePosition.y - halfSize,
-      data.mainSize,
-      data.mainSize
-    );
-
-    // Draw center point
-    ctx.fillStyle = '#1e293b';
+    // --- Satellite: large green circle ---
+    const satelliteRadius = 16;
     ctx.beginPath();
-    ctx.arc(satellitePosition.x, satellitePosition.y, 3, 0, Math.PI * 2);
+    ctx.arc(sat.x, sat.y, satelliteRadius, 0, Math.PI * 2);
+    ctx.fillStyle = '#22c55e';
     ctx.fill();
+    ctx.strokeStyle = '#4ade80';
+    ctx.lineWidth = 2;
+    ctx.stroke();
 
-    // Draw end mass (circle)
+    // Label
+    ctx.fillStyle = '#4ade80';
+    ctx.font = '12px monospace';
+    ctx.fillText('SAT', sat.x + satelliteRadius + 4, sat.y + 4);
+
+    // --- End mass: small yellow circle ---
+    const endMassRadius = 8;
+    ctx.beginPath();
+    ctx.arc(end.x, end.y, endMassRadius, 0, Math.PI * 2);
     ctx.fillStyle = '#f59e0b';
+    ctx.fill();
     ctx.strokeStyle = '#fbbf24';
     ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(
-      data.endMassPosition.x,
-      data.endMassPosition.y,
-      data.endMassRadius,
-      0,
-      Math.PI * 2
-    );
-    ctx.fill();
     ctx.stroke();
 
-    // Draw velocity vector for end mass
-    const velocityScale = 20;
-    const velX = data.linearSpeed.x * velocityScale;
-    const velY = data.linearSpeed.y * velocityScale;
-    
-    ctx.strokeStyle = '#10b981';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(data.endMassPosition.x, data.endMassPosition.y);
-    ctx.lineTo(data.endMassPosition.x + velX, data.endMassPosition.y + velY);
-    ctx.stroke();
-
-    // Draw arrow head
-    const angle = Math.atan2(velY, velX);
-    const arrowSize = 8;
-    ctx.fillStyle = '#10b981';
-    ctx.beginPath();
-    ctx.moveTo(
-      data.endMassPosition.x + velX,
-      data.endMassPosition.y + velY
-    );
-    ctx.lineTo(
-      data.endMassPosition.x + velX - arrowSize * Math.cos(angle - Math.PI / 6),
-      data.endMassPosition.y + velY - arrowSize * Math.sin(angle - Math.PI / 6)
-    );
-    ctx.lineTo(
-      data.endMassPosition.x + velX - arrowSize * Math.cos(angle + Math.PI / 6),
-      data.endMassPosition.y + velY - arrowSize * Math.sin(angle + Math.PI / 6)
-    );
-    ctx.closePath();
-    ctx.fill();
-
-    ctx.restore();
-
-    // Draw labels
-    ctx.fillStyle = '#94a3b8';
+    // Label
+    ctx.fillStyle = '#fbbf24';
     ctx.font = '12px monospace';
-    
-    // Calculate and display rotation angle
-    // const rotationAngle = Math.atan2(data.endMassPosition.y, data.endMassPosition.x);
-    // const rotationDegrees = ((rotationAngle * 180 / Math.PI) + 360) % 360;
-    // ctx.fillText(`Rotation: ${rotationDegrees.toFixed(1)}°`, 10, 40);
+    ctx.fillText('END', end.x + endMassRadius + 4, end.y + 4);
 
   }, [data]);
 

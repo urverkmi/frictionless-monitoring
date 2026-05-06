@@ -133,6 +133,23 @@ $(pkg-config --cflags --libs opencv4 gstreamer-1.0 gstreamer-app-1.0) \
 
 ---
 
+## CMake Build (this repository layout)
+
+From the `vision/` directory:
+
+```bash
+cmake -S . -B build
+cmake --build build -j4
+```
+
+Binary path:
+
+```bash
+./build/apriltag_demo
+```
+
+---
+
 # Run
 
 ```bash
@@ -146,6 +163,49 @@ q
 ```
 
 to quit.
+
+---
+
+# Single Camera Verification Checklist
+
+Use this sequence on the target Linux/Raspberry Pi environment:
+
+1) Verify `libcamerasrc` plugin:
+
+```bash
+gst-inspect-1.0 libcamerasrc
+```
+
+2) Build and run:
+
+```bash
+cd vision
+cmake -S . -B build
+cmake --build build -j4
+./build/apriltag_demo
+```
+
+3) Confirm single-camera pipeline in logs/code:
+
+* Pipeline contains one source:
+
+```text
+libcamerasrc ! ... ! appsink name=sink
+```
+
+* There is a single appsink (`name=sink`) and capture thread takes one sink pointer:
+
+```text
+captureThread(GstElement* sink)
+```
+
+4) Optional: print verbose GStreamer negotiation while running:
+
+```bash
+GST_DEBUG=2 ./build/apriltag_demo
+```
+
+If the app starts with one `libcamerasrc` source and one appsink, it is the single-camera pipeline.
 
 ---
 

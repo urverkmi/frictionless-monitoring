@@ -1,4 +1,6 @@
-const BASE_URL = `http://${window.location.hostname}:5001`;
+import { DEVICE_HOST } from '../config/network';
+
+const BASE_URL = `http://${DEVICE_HOST}:5001`;
 
 export async function sendStart(targetPWM = 200) {
   const response = await fetch(`${BASE_URL}/cmd/start`, {

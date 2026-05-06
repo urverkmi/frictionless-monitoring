@@ -55,7 +55,6 @@ class FrameData:
 
     # Quality metrics
     tracking_confidence: float  # 0.0 to 1.0
-
     tether_length: float = 0.0
     detection_quality: Optional[str] = None  # 'good', 'medium', 'poor'
     
