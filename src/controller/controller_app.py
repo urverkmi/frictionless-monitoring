@@ -4,12 +4,14 @@ TunaCan Plasma Brake Controller
 Aurora Propulsion Technologies IDD rev 5.0
 """
 
+import asyncio
 import serial
 import struct
 import crcmod
 import threading
 import time
 from typing import Optional
+from bleak import BleakClient, BleakScanner
 from flask import Flask, render_template_string, jsonify, request
 from flask_cors import CORS
 
@@ -36,6 +38,12 @@ ESP32_SERIAL_PORT = "/tmp/ttyVIRT_ESP0"   # Simulator mode
 # ESP32_SERIAL_PORT = "/dev/ttyACM0"      # Real hardware — check with: ls /dev/ttyACM*
 ESP32_BAUD_RATE   = 115200
 ESP32_TIMEOUT_S   = 2.0
+
+# Code Cell C6 BLE config (Nordic UART Service)
+CODECELL_BLE_NAME     = "EMMA"
+CODECELL_SERVICE_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+CODECELL_WRITE_UUID   = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+CODECELL_SCAN_TIMEOUT = 10.0
 
 # ─────────────────────────────────────────
 # CRC setup (matches IDD spec)
@@ -160,7 +168,6 @@ class ESP32Connection:
         self._listener_running = True
         def _listen():
             while self._listener_running:
-                try:
                     if not self._ser or not self._ser.is_open:
                         time.sleep(0.5)
                         continue
@@ -170,6 +177,10 @@ class ESP32Connection:
                     print(f"[ESP32] Received: {line}")
                     if line == "DETACHED":
                         system_state["esp32_detached"] = True
+                        try:
+                            codecell.send("1")
+                        except Exception as e:
+                            print(f"[CodeCell] activate failed: {e}")
                         try:
                             set_solenoid(True)
                             print("[ESP32] DETACHED received — release activated (GPIO 17 HIGH)")
@@ -193,6 +204,84 @@ class ESP32Connection:
 
 
 esp32 = ESP32Connection(ESP32_SERIAL_PORT, ESP32_BAUD_RATE, ESP32_TIMEOUT_S)
+
+
+# ─────────────────────────────────────────
+# Code Cell C6 BLE link
+# ─────────────────────────────────────────
+class CodeCellBLE:
+    """Persistent BLE link to the Code Cell C6 (NUS write-only protocol)."""
+
+    def __init__(self, name: str, service_uuid: str, write_uuid: str):
+        self.name = name
+        self.service_uuid = service_uuid
+        self.write_uuid = write_uuid
+
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
+        self._thread.start()
+
+        self._client: Optional[BleakClient] = None
+        self._lock = threading.Lock()
+
+    def _run(self, coro, timeout: float):
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=timeout)
+
+    async def _async_connect(self) -> bool:
+        if self._client and self._client.is_connected:
+            return True
+        device = await BleakScanner.find_device_by_name(self.name, timeout=CODECELL_SCAN_TIMEOUT)
+        if device is None:
+            print(f"[CodeCell] Device '{self.name}' not found")
+            return False
+        client = BleakClient(device, disconnected_callback=self._on_disconnect)
+        await client.connect()
+        self._client = client
+        print(f"[CodeCell] Connected to {self.name} ({device.address})")
+        return True
+
+    async def _async_send(self, payload: bytes):
+        if not (self._client and self._client.is_connected):
+            await self._async_connect()
+        if not (self._client and self._client.is_connected):
+            raise RuntimeError("CodeCell not connected")
+        await self._client.write_gatt_char(self.write_uuid, payload, response=False)
+
+    def _on_disconnect(self, _client):
+        print("[CodeCell] Disconnected")
+
+    def connect(self) -> bool:
+        with self._lock:
+            try:
+                return self._run(self._async_connect(), timeout=CODECELL_SCAN_TIMEOUT + 5)
+            except Exception as e:
+                print(f"[CodeCell] Connect failed: {e}")
+                return False
+
+    def send(self, command: str) -> Optional[str]:
+        """Send 'on'/'off' style command. Anything starting with '1' → b'1', else b'0'."""
+        cmd = command.strip()
+        payload = b"1" if cmd.startswith("1") else b"0"
+        with self._lock:
+            try:
+                self._run(self._async_send(payload), timeout=5.0)
+                print(f"[CodeCell] Sent: {payload.decode()}")
+                return "sent"
+            except Exception as e:
+                print(f"[CodeCell] Send failed: {e}")
+                self._client = None
+                return None
+
+    def close(self):
+        if self._client and self._client.is_connected:
+            try:
+                self._run(self._client.disconnect(), timeout=5.0)
+            except Exception:
+                pass
+        self._loop.call_soon_threadsafe(self._loop.stop)
+
+
+codecell = CodeCellBLE(CODECELL_BLE_NAME, CODECELL_SERVICE_UUID, CODECELL_WRITE_UUID)
 
 
 # ─────────────────────────────────────────
@@ -251,6 +340,12 @@ def cmd_stop():
         set_solenoid(False)
     except Exception as e:
         pass  # Still try to send safe mode even if GPIO fails
+
+    # Deactivate Code Cell over BLE (best-effort)
+    try:
+        codecell.send("0")
+    except Exception as e:
+        print(f"[CodeCell] deactivate failed: {e}")
 
     # Emergency stop ESP32
     esp32_result = esp32.send("STOP")

@@ -13,3 +13,4 @@ flask
 flask-cors
 pyserial
 crcmod
+bleak>=0.22

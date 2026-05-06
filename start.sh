@@ -98,7 +98,7 @@ fi
 
 # ── 3. Start Flask backend ───────────────────
 echo "[3/3] Starting Flask backend (port 5001)..."
-(cd "$REPO_DIR/src/controller" && "$PYTHON_BIN" controller_app.py >> "$LOG_DIR/flask.log" 2>&1) &
+(cd "$REPO_DIR/src/controller" && "$PYTHON_BIN" -u controller_app.py >> "$LOG_DIR/flask.log" 2>&1) &
 FLASK_PID=$!
 sleep 2
 
@@ -109,14 +109,18 @@ BRIDGE_PID=$!
 sleep 1
 
 # ── 5. AprilTag vision (optional; Pi / built binary) ─
+# Game mode: set GAME_MODE=1 (and optionally PUCK_TAG_ID, default 1) to launch
+# the detector with --single-tag <id>, which makes it emit whenever the puck is
+# visible (no second tag required). Default invocation is unchanged.
 VISION_BIN="$REPO_DIR/vision/build/apriltag_demo"
+VISION_ARGS=( --no-vis )
+if [[ "${GAME_MODE:-}" == "1" ]]; then
+  PUCK_TAG_ID="${PUCK_TAG_ID:-1}"
+  VISION_ARGS+=( --single-tag "$PUCK_TAG_ID" )
+fi
 if [[ -x "$VISION_BIN" ]]; then
-  echo "      Starting AprilTag vision (--no-vis)..."
-  if command -v stdbuf >/dev/null 2>&1; then
-    (stdbuf -oL -eL "$VISION_BIN" --no-vis >> "$LOG_DIR/vision.log" 2>&1) &
-  else
-    ("$VISION_BIN" --no-vis >> "$LOG_DIR/vision.log" 2>&1) &
-  fi
+  echo "      Starting AprilTag vision (${VISION_ARGS[*]})..."
+  ("$VISION_BIN" "${VISION_ARGS[@]}" >> "$LOG_DIR/vision.log" 2>&1) &
   VISION_PID=$!
   sleep 1
 else

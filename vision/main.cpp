@@ -80,9 +80,10 @@ constexpr double CALIB_TAG_SIZE          = 0.10;
 constexpr double CALIB_W                 = 1.60;
 constexpr double CALIB_H                 = 0.60;
 
-// Tracking tag IDs
-constexpr int    TRACK_TAG0              = 0;
-constexpr int    TRACK_TAG1              = 1;
+// Tracking tag IDs (TRACK_TAG1 is overridable at runtime via --single-tag)
+constexpr int    TRACK_TAG0         = 0;
+int              TRACK_TAG1         = 1;
+bool             g_singleTagMode    = false;
 
 // Confidence weights
 constexpr double W_MARGIN                = 0.50;
@@ -454,6 +455,27 @@ void trackingThread(CameraContext& cam, int core)
         image_u8_t img { gray.cols, gray.rows, gray.cols, gray.data };
         auto detections = apriltag_detector_detect(detector, &img);
 
+        // Debug: dump every detected tag ID per camera per frame, along with
+        // hamming (bit errors) and decision_margin (decode quality). Anything
+        // with hamming > 1 is dropped at the filter below; that would explain
+        // a detection appearing here but never reaching tag1obs.
+        // Grep for it: tail -f logs/vision.log | grep '\[cam'
+        if (zarray_size(detections) > 0)
+        {
+            std::cerr << "[cam " << cam.id << "] detections="
+                      << zarray_size(detections);
+            for (int i = 0; i < zarray_size(detections); ++i)
+            {
+                apriltag_detection_t* d;
+                zarray_get(detections, i, &d);
+                std::cerr << " id=" << d->id
+                          << "(h=" << d->hamming
+                          << ",m=" << d->decision_margin << ")";
+                if (d->hamming > 1) std::cerr << "[DROPPED]";
+            }
+            std::cerr << "\n";
+        }
+
         std::vector<cv::Point2f> calibImg;
         std::vector<cv::Point3f> calibObj;
         TagState new0, new1;
@@ -473,7 +495,9 @@ void trackingThread(CameraContext& cam, int core)
                 }
             }
 
-            if (cam.calibrated && (det->id==TRACK_TAG0 || det->id==TRACK_TAG1))
+            // --- Tracking tags ---
+            if (cam.calibrated &&
+                (det->id == TRACK_TAG0 || det->id == TRACK_TAG1))
             {
                 std::vector<cv::Point2f> imgPts;
                 for (int k=0;k<4;++k) imgPts.emplace_back(det->p[k][0],det->p[k][1]);
@@ -492,7 +516,8 @@ void trackingThread(CameraContext& cam, int core)
                 ts.confidence = conf;
                 ts.visible    = true;
 
-                if (det->id==TRACK_TAG0) new0=ts; else new1=ts;
+                if (det->id == TRACK_TAG0) new0 = ts;
+                else                        new1 = ts;
             }
         }
 
@@ -573,25 +598,43 @@ void fusionThread(int core)
             fusedTag0=f0; fusedTag1=f1;
         }
 
-        // UDP datagram
-        if (udpFd>=0 && f0.visible && f1.visible)
+        // --- Detector contract -> Python (UDP), docs/api.md ---
+        const bool gateOpen = g_singleTagMode
+            ? f1.visible
+            : (f0.visible && f1.visible);
+        if (udpFd >= 0 && gateOpen)
         {
+            const auto wallNow = std::chrono::system_clock::now();
             const double tsSec = std::chrono::duration<double>(
-                std::chrono::system_clock::now().time_since_epoch()).count();
-            double dx=f1.pose.x-f0.pose.x, dy=f1.pose.y-f0.pose.y;
-            double orbit=std::atan2(dy,dx);
-            if (orbit<0) orbit+=2.0*std::acos(-1.0);
-            double tc=std::min(f0.confidence,f1.confidence);
+                                     wallNow.time_since_epoch())
+                                     .count();
+
+            double satX = 0.0, satY = 0.0, orbit = 0.0;
+            double trackConf = f1.confidence;
+            if (!g_singleTagMode)
+            {
+                satX = f0.pose.x;
+                satY = f0.pose.y;
+                const double dx = f1.pose.x - f0.pose.x;
+                const double dy = f1.pose.y - f0.pose.y;
+                orbit = std::atan2(dy, dx);
+                if (orbit < 0.0)
+                    orbit += 2.0 * std::acos(-1.0);
+                trackConf = std::min(f0.confidence, f1.confidence);
+            }
 
             std::ostringstream det;
             det.setf(std::ios::fixed);
             det << std::setprecision(6)
                 << "{\"timestamp\":"<<tsSec<<",\"frame_id\":"<<frameCounter.load()
                 << ",\"camera_id\":\"fused\""
-                << ",\"satellite_position\":{\"x\":"<<f0.pose.x<<",\"y\":"<<f0.pose.y<<"}"
-                << ",\"end_mass_position\":{\"x\":"<<f1.pose.x<<",\"y\":"<<f1.pose.y<<"}"
-                << ",\"orbital_angular_position\":"<<orbit
-                << ",\"tracking_confidence\":"<<std::setprecision(4)<<tc<<"}";
+                << ",\"satellite_position\":{\"x\":" << satX
+                << ",\"y\":" << satY << '}'
+                << ",\"end_mass_position\":{\"x\":" << f1.pose.x
+                << ",\"y\":" << f1.pose.y << '}'
+                << ",\"orbital_angular_position\":" << orbit
+                << ",\"tracking_confidence\":";
+            det << std::setprecision(4) << trackConf << '}';
 
             const std::string s=det.str();
             (void)sendto(udpFd, s.data(), s.size(), 0,
@@ -674,14 +717,40 @@ int main(int argc, char** argv)
 {
     gst_init(&argc, &argv);
     bool enableVis = true;
-    for (int i=1;i<argc;++i)
-        if (std::strcmp(argv[i],"--no-vis")==0) enableVis=false;
+    for (int i = 1; i < argc; ++i)
+    {
+        if (std::strcmp(argv[i], "--no-vis") == 0)
+            enableVis = false;
+        else if (std::strcmp(argv[i], "--single-tag") == 0 && i + 1 < argc)
+        {
+            TRACK_TAG1      = std::atoi(argv[++i]);
+            g_singleTagMode = true;
+        }
+    }
 
-    cameras[0].id=0; cameras[0].device=CAM_DEVICE_A;
-    cameras[0].K=makeK(); cameras[0].D=makeD();
+    // Initialise camera contexts
+    cameras[0].id     = 0;
+    cameras[0].device = CAM_DEVICE_A;
+    cameras[0].K      = makeK();
+    cameras[0].D      = makeD();
 
-    cameras[1].id=1; cameras[1].device=CAM_DEVICE_B;
-    cameras[1].K=makeK(); cameras[1].D=makeD();
+    cameras[1].id     = 1;
+    cameras[1].device = CAM_DEVICE_B;
+    cameras[1].K      = makeK();
+    cameras[1].D      = makeD();
+
+    if (g_singleTagMode)
+    {
+        for (int c = 0; c < 2; ++c)
+        {
+            cameras[c].R_wc = (cv::Mat_<double>(3, 3) <<
+                                1.0,  0.0, 0.0,
+                                0.0, -1.0, 0.0,
+                                0.0,  0.0, 1.0);
+            cameras[c].t_wc = cv::Mat::zeros(3, 1, CV_64F);
+            cameras[c].calibrated = true;
+        }
+    }
 
     for (int c=0;c<2;++c)
     {

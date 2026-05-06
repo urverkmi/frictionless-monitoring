@@ -25,6 +25,20 @@ pip install -r requirements.txt
 cd gui && npm start # GUI only (for frontend development)
 ```
 
+## De-orbit Snoopy!
+
+An interactive game that reuses the AprilTag camera pipeline, designed for our Gala visitors to have some fun while getting an experience of our system. A single puck (an air bearing carrying an AprilTag) sits on the table; the player can flick it toward a target zone shown in the GUI.
+
+**Run:**
+```bash
+GAME_MODE=1 PUCK_TAG_ID=<id> ./start.sh   # <id> = AprilTag ID on your puck (e.g. 6)
+```
+Then open `http://<pi-host>:3000/game` in a browser and click **Start round**.
+
+`GAME_MODE=1` makes `start.sh` launch the C++ detector with `--single-tag <id>`, which emits UDP whenever the puck is visible (no second tag required). Without `GAME_MODE` set, the launcher behaves identically to before — the plasma-brake monitor at `/` is untouched.
+
+**Tuning:** all game parameters (table bounds, target size, round duration, scoring threshold) live in [`gui/src/gameConfig.js`](gui/src/gameConfig.js) with inline comments — edit and reload the GUI.
+
 ## Vision Data Pipeline
 See [docs/api.md](docs/api.md) for the data contract between the C++ AprilTag detector, Python backend, and GUI (UDP JSON format, coordinate frames, kinematics fields).
 
