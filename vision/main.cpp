@@ -33,9 +33,8 @@ constexpr int    resolution_divider = 2;
 constexpr int    DISPLAY_W          = 2028;
 constexpr int    DISPLAY_H          = 1520;
 
-constexpr double TAG_SIZE           = 0.10;   // metres, tracking tags
-constexpr double TAG_SIZE_ID1       = 0.20;   // metres (reserved)
-constexpr double CALIB_SQUARE       = 0.80;   // metres
+constexpr double TAG_SIZE           = 0.056;   // metres, tracking tags
+constexpr double CALIB_SQUARE       = 0.70;   // metres
 
 constexpr int    TRACK_TAG0         = 0;
 constexpr int    TRACK_TAG1         = 1;
@@ -49,6 +48,8 @@ constexpr double W_SIZE             = 0.10;   // tag pixel-size weight
 constexpr double MARGIN_SAT         = 80.0;   // margin value that maps to score 1.0
 constexpr double SIZE_SAT           = 200.0;  // pixel diagonal that maps to score 1.0
 constexpr double REPROJ_MAX         = 5.0;    // reprojection error (px) that maps to score 0.0
+constexpr double MIN_TRACK_CONF      = 0.45;   // reject low-confidence pose outliers
+constexpr double MAX_TRACK_JUMP_M    = 0.20;   // reject implausible frame-to-frame jumps
 
 // ============================================================
 // GLOBAL STATE
@@ -77,7 +78,18 @@ struct TagState
     Pose   pose;
     double confidence = 0.0;   // [0 .. 1]
     bool   visible    = false;
+    std::vector<cv::Point2f> corners;
 };
+
+static bool isPlausibleJump(const TagState& previous, const TagState& current)
+{
+    // If previous pose was not visible, accept reacquisition directly.
+    if (!previous.visible) return true;
+    const double dx = current.pose.x - previous.pose.x;
+    const double dy = current.pose.y - previous.pose.y;
+    const double jump = std::sqrt(dx * dx + dy * dy);
+    return jump <= MAX_TRACK_JUMP_M;
+}
 
 std::mutex   poseMutex;
 TagState     tag0State;
@@ -426,10 +438,15 @@ void trackingThread()
 
         // Reset visibility each frame
         TagState new0, new1;
+        TagState prev0, prev1;
         {
             std::lock_guard<std::mutex> lock(poseMutex);
             new0 = tag0State;  new0.visible = false;
             new1 = tag1State;  new1.visible = false;
+            new0.corners.clear();
+            new1.corners.clear();
+            prev0 = tag0State;
+            prev1 = tag1State;
         }
 
         for (int i = 0; i < zarray_size(detections); ++i)
@@ -477,9 +494,20 @@ void trackingThread()
                 ts.pose       = { world.x, world.y, yaw };
                 ts.confidence = conf;
                 ts.visible    = true;
+                ts.corners    = imgPts;
 
-                if (det->id == TRACK_TAG0) new0 = ts;
-                else                        new1 = ts;
+                // Hard reject low-confidence detections: they are a major source
+                // of repeated "fixed-value" spikes when a false tag pose appears.
+                if (ts.confidence < MIN_TRACK_CONF) continue;
+
+                if (det->id == TRACK_TAG0)
+                {
+                    if (isPlausibleJump(prev0, ts)) new0 = ts;
+                }
+                else
+                {
+                    if (isPlausibleJump(prev1, ts)) new1 = ts;
+                }
             }
         }
 
@@ -542,6 +570,8 @@ void visThread()
             frame = latestFrame.clone();
         }
 
+        const int srcW = frame.cols;
+        const int srcH = frame.rows;
         cv::resize(frame, frame, cv::Size(DISPLAY_W, DISPLAY_H));
 
         TagState s0, s1;
@@ -567,6 +597,32 @@ void visThread()
 
         drawTag(s0, "Tag0", 50,  {0, 255,   0});
         drawTag(s1, "Tag1", 100, {0, 100, 255});
+
+        auto drawTagBorder = [&](const TagState& ts,
+                                 const std::string& label,
+                                 const cv::Scalar& colour)
+        {
+            if (!ts.visible || ts.corners.size() != 4 || srcW <= 0 || srcH <= 0) return;
+
+            const float sx = static_cast<float>(DISPLAY_W) / static_cast<float>(srcW);
+            const float sy = static_cast<float>(DISPLAY_H) / static_cast<float>(srcH);
+
+            std::vector<cv::Point> scaled;
+            scaled.reserve(4);
+            for (const auto& p : ts.corners)
+            {
+                scaled.emplace_back(
+                    static_cast<int>(std::lround(p.x * sx)),
+                    static_cast<int>(std::lround(p.y * sy)));
+            }
+
+            cv::polylines(frame, scaled, true, colour, 4, cv::LINE_AA);
+            cv::putText(frame, label, scaled[0] + cv::Point(0, -10),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.9, colour, 2, cv::LINE_AA);
+        };
+
+        drawTagBorder(s0, "tag0", {0, 255, 0});
+        drawTagBorder(s1, "tag1", {0, 100, 255});
 
         // Calibration status indicator
         cv::putText(frame,
