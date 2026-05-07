@@ -2,12 +2,19 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <algorithm>
 #include <map>
 #include <vector>
 #include <chrono>
 #include <cmath>
 #include <sstream>
 #include <iomanip>
+#include <string>
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <opencv2/opencv.hpp>
 
@@ -75,6 +82,10 @@ struct TagState
 std::mutex   poseMutex;
 TagState     tag0State;
 TagState     tag1State;
+
+// UDP output for Python bridge (Detector Contract)
+int udpSock = -1;
+sockaddr_in udpAddr{};
 
 // Camera -> world transform
 cv::Mat R_wc;
@@ -319,6 +330,57 @@ static std::string tagJson(const std::string& key, const TagState& ts)
         "}";
 }
 
+static bool initUdpSender(const std::string& host = "127.0.0.1", int port = 9001)
+{
+    udpSock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (udpSock < 0) return false;
+
+    udpAddr = {};
+    udpAddr.sin_family = AF_INET;
+    udpAddr.sin_port   = htons(port);
+    if (inet_pton(AF_INET, host.c_str(), &udpAddr.sin_addr) != 1)
+    {
+        close(udpSock);
+        udpSock = -1;
+        return false;
+    }
+    return true;
+}
+
+static void sendDetectorContract(
+    uint64_t frameId,
+    double unixSeconds,
+    const TagState& satellite,
+    const TagState& endMass)
+{
+    if (udpSock < 0) return;
+
+    // orbital angle from satellite -> end-mass vector (radians)
+    const double dx = endMass.pose.x - satellite.pose.x;
+    const double dy = endMass.pose.y - satellite.pose.y;
+    const double orbital = std::atan2(dy, dx);
+    const double conf = std::min(satellite.confidence, endMass.confidence);
+
+    std::string payload =
+        "{"
+        "\"timestamp\":" + fp(unixSeconds, 6) +
+        ",\"frame_id\":" + std::to_string(frameId) +
+        ",\"camera_id\":\"cam0\"" +
+        ",\"satellite_position\":{\"x\":" + fp(satellite.pose.x) + ",\"y\":" + fp(satellite.pose.y) + "}" +
+        ",\"end_mass_position\":{\"x\":" + fp(endMass.pose.x) + ",\"y\":" + fp(endMass.pose.y) + "}" +
+        ",\"orbital_angular_position\":" + fp(orbital, 6) +
+        ",\"tracking_confidence\":" + fp(conf, 3) +
+        "}";
+
+    (void)sendto(
+        udpSock,
+        payload.c_str(),
+        payload.size(),
+        0,
+        reinterpret_cast<const sockaddr*>(&udpAddr),
+        sizeof(udpAddr));
+}
+
 // ============================================================
 // TRACKING THREAD
 // ============================================================
@@ -451,6 +513,14 @@ void trackingThread()
             << ","           << tagJson("tag0", s0)
             << ","           << tagJson("tag1", s1)
             << "}\n";
+
+        // Forward bridge contract when both tracking tags are visible.
+        if (s0.visible && s1.visible)
+        {
+            auto now = std::chrono::system_clock::now();
+            double unixSec = std::chrono::duration<double>(now.time_since_epoch()).count();
+            sendDetectorContract(frameCounter.load(), unixSec, s0, s1);
+        }
     }
 }
 
@@ -518,6 +588,11 @@ int main(int argc, char** argv)
 {
     gst_init(&argc, &argv);
 
+    if (!initUdpSender())
+    {
+        std::cerr << "[WARN] Failed to initialize UDP sender (127.0.0.1:9001)\n";
+    }
+
     // NOTE: resolution_divider is a C++ constexpr, not a GStreamer variable.
     // The pipeline string must use the computed literal values.
     const int cam_w = 4056 / resolution_divider;
@@ -554,5 +629,6 @@ int main(int argc, char** argv)
 
     gst_element_set_state(pipe, GST_STATE_NULL);
     gst_object_unref(pipe);
+    if (udpSock >= 0) close(udpSock);
     return 0;
 }

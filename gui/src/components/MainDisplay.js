@@ -13,8 +13,15 @@ function MainDisplay({ data }) {
     const width = canvas.width;
     const height = canvas.height;
 
+    // Always clear and paint background first so canvas never appears "missing".
+    ctx.fillStyle = '#0f172a';
+    ctx.fillRect(0, 0, width, height);
+
     const satellitePosition = data.satellitePosition || data.mainPosition;
     if (!satellitePosition || !data.endMassPosition) {
+      ctx.fillStyle = '#64748b';
+      ctx.font = '14px monospace';
+      ctx.fillText('Waiting for stream data...', 24, 32);
       return;
     }
 
@@ -27,8 +34,11 @@ function MainDisplay({ data }) {
       endWorld.y - satWorld.y
     );
 
-    // Guard: if the two objects are essentially the same point, skip rendering
+    // Guard: if the two objects are essentially the same point, keep canvas visible
     if (worldDistance < 1e-6 && !data.tetherLength) {
+      ctx.fillStyle = '#64748b';
+      ctx.font = '14px monospace';
+      ctx.fillText('Waiting for movement...', 24, 32);
       return;
     }
 
@@ -64,10 +74,6 @@ function MainDisplay({ data }) {
 
     const sat = worldToCanvas(satWorld);
     const end = worldToCanvas(endWorld);
-
-    // --- Clear ---
-    ctx.fillStyle = '#0f172a';
-    ctx.fillRect(0, 0, width, height);
 
     // --- Grid ---
     ctx.strokeStyle = '#1e293b';
@@ -133,12 +139,15 @@ function MainDisplay({ data }) {
 
   return (
     <div className="flex-1 flex items-center justify-center p-8 border-r-2 border-slate-700">
-      <div className="w-full h-full bg-slate-900 rounded-xl shadow-2xl overflow-hidden">
+      <div
+        className="w-full h-full bg-slate-900 rounded-xl shadow-2xl overflow-hidden"
+        style={{ minHeight: '320px' }}
+      >
         <canvas
           ref={canvasRef}
           width={800}
           height={600}
-          style={{ width: '100%', height: '100%' }}
+          style={{ width: '100%', height: '100%', display: 'block' }}
         />
       </div>
     </div>
