@@ -6,16 +6,23 @@ export const GAME_CONFIG = {
   // Applied to the puck's incoming position before rendering / hit detection.
   // Tune until pushing the puck physically right makes it move right on the
   // canvas, etc. Order: rotate -> mirror -> scale -> offset.
-  viewRotationDeg: -90,    // try 0, 90, -90, 180. Camera mounted "sideways"? Use ±90.
+  // viewRotationDeg: -90,    // try 0, 90, -90, 180. Camera mounted "sideways"? Use ±90.
+  // viewMirrorX:    false, // flip horizontally if the puck moves the wrong way left/right
+  // viewMirrorY:    false, // flip vertically if the puck moves the wrong way up/down
+  // viewScale:      1.0,   // overall scale on top of pixelsPerMetre (use to stretch)
+  // viewOffsetX:    -0.24,   // m, added after rotation/mirror/scale (recenter origin)
+  // viewOffsetY:    -0.4,   // m
+
+  viewRotationDeg: -270,    // try 0, 90, -90, 180. Camera mounted "sideways"? Use ±90.
   viewMirrorX:    false, // flip horizontally if the puck moves the wrong way left/right
   viewMirrorY:    false, // flip vertically if the puck moves the wrong way up/down
   viewScale:      1.0,   // overall scale on top of pixelsPerMetre (use to stretch)
-  viewOffsetX:    -0.03,   // m, added after rotation/mirror/scale (recenter origin)
-  viewOffsetY:    -0.4,   // m
+  viewOffsetX:    0.2,   // m, added after rotation/mirror/scale (recenter origin)
+  viewOffsetY:    0.35,   // m
 
   // ---- Table bounds (world frame, metres). Match your calibration rectangle. ----
-  tableHalfWidth:  0.6,   // half of long axis (X). Default 0.8 = 1.6 m table.
-  tableHalfHeight: 0.6,   // half of short axis (Y). Default 0.3 = 0.6 m table.
+  tableHalfWidth:  0.5,   // half of long axis (X). Default 0.8 = 1.6 m table.
+  tableHalfHeight: 0.5,   // half of short axis (Y). Default 0.3 = 0.6 m table.
 
   // ---- Target ----
   targetRadius:             0.08,  // m. ~8 cm circle. Smaller = harder.

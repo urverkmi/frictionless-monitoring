@@ -115,7 +115,7 @@ function GameSidebar({
               </span>
             </div>
           </div>
-          <div style={cardStyle}>
+          {/* <div style={cardStyle}>
             <div style={labelStyle}>Projected score (if you hit now)</div>
             <div style={{ ...valueStyle, fontSize: '2rem', color: '#22c55e' }}>
               {projectedScore}
@@ -124,7 +124,7 @@ function GameSidebar({
               Slower & more deliberate = higher score.
               Score zeroes at peak ≥ {GAME_CONFIG.maxAllowedSpeed} m/s.
             </div>
-          </div>
+          </div> */}
         </>
       )}
 

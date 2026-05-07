@@ -1,4 +1,4 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import { GAME_CONFIG } from '../gameConfig';
 
 // Maps a world-frame point (metres) to canvas pixel coordinates.
@@ -12,6 +12,15 @@ function worldToCanvas(world, canvasWidth, canvasHeight) {
 
 function GameCanvas({ puckPosition, target, hitFlashUntil }) {
   const canvasRef = useRef(null);
+  const snoopyImgRef = useRef(null);
+  const [snoopyLoaded, setSnoopyLoaded] = useState(false);
+
+  useEffect(() => {
+    const img = new Image();
+    img.onload = () => setSnoopyLoaded(true);
+    img.src = `${process.env.PUBLIC_URL}/snoopy_PNG27.png`;
+    snoopyImgRef.current = img;
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -85,18 +94,19 @@ function GameCanvas({ puckPosition, target, hitFlashUntil }) {
       ctx.fill();
     }
 
-    // Puck
+    // Puck (Snoopy head — sized at 56 px on the longer side, preserving aspect ratio)
     if (puckPosition) {
       const pc = worldToCanvas(puckPosition, width, height);
-      ctx.fillStyle = '#f59e0b';
-      ctx.strokeStyle = '#fbbf24';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(pc.x, pc.y, 10, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
+      const img = snoopyImgRef.current;
+      const longSide = 56;
+      if (img && img.complete && img.naturalWidth > 0) {
+        const aspect = img.naturalWidth / img.naturalHeight;
+        const drawW = aspect >= 1 ? longSide : longSide * aspect;
+        const drawH = aspect >= 1 ? longSide / aspect : longSide;
+        ctx.drawImage(img, pc.x - drawW / 2, pc.y - drawH / 2, drawW, drawH);
+      }
     }
-  }, [puckPosition, target, hitFlashUntil]);
+  }, [puckPosition, target, hitFlashUntil, snoopyLoaded]);
 
   // Canvas pixel size derives from the configured table size + scale, so the
   // table outline always fills the canvas with the right aspect ratio.
