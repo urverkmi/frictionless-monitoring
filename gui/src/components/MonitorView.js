@@ -18,19 +18,16 @@ import { sendStart, sendStop } from '../services/controlService';
  *                             → RS422 signal hits the PCB
  **/
 
-const TETHER_LENGTH = 150;
-const MAIN_SIZE = 20;
-const END_MASS_RADIUS = 12;
+const TETHER_LENGTH = 0;
+
 
 function MonitorView() {
   const [data, setData] = useState({
     linearSpeed: { x: 0, y: 0 },
     angularSpeed: { x: 0, y: 0 },
     satellitePosition: { x: 0, y: 0 },
-    endMassPosition: { x: TETHER_LENGTH, y: 0 },
+    endMassPosition: { x: 0, y: 0 },
     tetherLength: TETHER_LENGTH,
-    mainSize: MAIN_SIZE,
-    endMassRadius: END_MASS_RADIUS,
     timestamp: Date.now()
   });
 
