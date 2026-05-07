@@ -14,3 +14,4 @@ flask-cors
 pyserial
 crcmod
 bleak>=0.22
+gpiod>=2.0

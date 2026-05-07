@@ -24,18 +24,19 @@ except ImportError:
     print("[WARN] gpiod not available — GPIO calls will be simulated (macOS dev mode)")
 
 
-SERIAL_PORT = "/tmp/ttyVIRT0"    # Simulator mode
-# SERIAL_PORT = "/dev/ttyUSB0"   # Check with: ls /dev/ttyUSB*
+# SERIAL_PORT = "/tmp/ttyVIRT0"    # Simulator mode
+SERIAL_PORT = "/dev/ttyUSB0"   # Check with: ls /dev/ttyUSB*
 BAUD_RATE   = 115200
 TIMEOUT_S   = 1.0
 
 # GPIO config
-SOLENOID_GPIO = 17          # BCM 17 = physical pin 11 (release signal)
-GPIO_CHIP     = "/dev/gpiochip4"   # Pi 5 user GPIOs
+SOLENOID_GPIO          = 17          # BCM 17 = physical pin 11 (release signal)
+GPIO_CHIP              = "/dev/gpiochip0"   # Pi 5 user GPIOs (pinctrl-rp1)
+SOLENOID_PULSE_DURATION_S = 2.0      # seconds before auto-release goes LOW after START
 
 # ESP32 UART config
-ESP32_SERIAL_PORT = "/tmp/ttyVIRT_ESP0"   # Simulator mode
-# ESP32_SERIAL_PORT = "/dev/ttyACM0"      # Real hardware — check with: ls /dev/ttyACM*
+# ESP32_SERIAL_PORT = "/tmp/ttyVIRT_ESP0"   # Simulator mode
+ESP32_SERIAL_PORT = "/dev/ttyACM0"      # Real hardware — check with: ls /dev/ttyACM*
 ESP32_BAUD_RATE   = 115200
 ESP32_TIMEOUT_S   = 2.0
 
@@ -105,19 +106,29 @@ def send_command(cmd: int, payload: bytes = b'') -> dict:
         return {"status": "error", "detail": str(e)}
 
 
+_solenoid_req = None
+
+def _init_solenoid():
+    """Request the solenoid GPIO line once, initially LOW."""
+    global _solenoid_req
+    if not GPIO_AVAILABLE or _solenoid_req is not None:
+        return
+    settings = LineSettings(direction=Direction.OUTPUT, output_value=Value.INACTIVE)
+    _solenoid_req = gpiod.request_lines(
+        GPIO_CHIP,
+        consumer="solenoid-ctrl",
+        config={SOLENOID_GPIO: settings},
+    )
+
 def set_solenoid(on: bool):
     """Drive the MOSFET gate HIGH (release on) or LOW (release off)."""
     if not GPIO_AVAILABLE:
         print(f"[GPIO-SIM] Solenoid {'ON' if on else 'OFF'}")
         return
+    _init_solenoid()
     val = Value.ACTIVE if on else Value.INACTIVE
-    settings = LineSettings(direction=Direction.OUTPUT, output_value=val)
-    req = gpiod.request_lines(
-        GPIO_CHIP,
-        consumer="solenoid-ctrl",
-        config={SOLENOID_GPIO: settings},
-    )
-    req.release()
+    _solenoid_req.set_value(SOLENOID_GPIO, val)
+    print(f"[GPIO] GPIO {SOLENOID_GPIO} {'HIGH' if on else 'LOW'}")
 
 
 # ─────────────────────────────────────────
@@ -140,6 +151,8 @@ class ESP32Connection:
             return True
         try:
             self._ser = serial.Serial(self.port, self.baudrate, timeout=self.timeout)
+            time.sleep(2)                    # wait for ESP32 DTR-reset to finish booting
+            self._ser.reset_input_buffer()   # discard boot messages before sending commands
             print(f"[ESP32] Connected on {self.port}")
             if not self._listener_running:
                 self.start_listener()
@@ -168,6 +181,7 @@ class ESP32Connection:
         self._listener_running = True
         def _listen():
             while self._listener_running:
+                try:
                     if not self._ser or not self._ser.is_open:
                         time.sleep(0.5)
                         continue
@@ -314,9 +328,22 @@ def cmd_start():
     # Step 2: Enter Early Deployment
     r2 = send_command(CMD_SET_MODE, bytes([MODE_EARLY_DEPLOYMENT]))
 
-    # Step 3: Signal ESP32 to run spinup cycle
-    # GPIO 17 (release) is NOT activated here — the ESP32 listener thread
-    # will activate it when it receives DETACHED from the ESP32.
+    # Step 3: Set GPIO 17 HIGH (release signal), then auto-LOW after duration
+    pulse_duration = data.get("solenoidDuration", SOLENOID_PULSE_DURATION_S)
+    try:
+        set_solenoid(True)
+        def _auto_off():
+            time.sleep(pulse_duration)
+            try:
+                set_solenoid(False)
+                print(f"[GPIO] Auto-release OFF after {pulse_duration}s")
+            except Exception as e:
+                print(f"[GPIO] Auto-release failed: {e}")
+        threading.Thread(target=_auto_off, daemon=True).start()
+    except Exception as e:
+        print(f"[WARN] GPIO set HIGH failed: {e}")
+
+    # Step 4: Signal ESP32 to run spinup cycle
     system_state["esp32_detached"] = False
     esp32_result = esp32.send(f"PWM:{target_pwm}")
     if esp32_result is None:
@@ -330,7 +357,8 @@ def cmd_start():
         "action": system_state["last_action"],
         "response": system_state["last_response"],
         "running": system_state["running"],
-        "targetPWM": target_pwm
+        "targetPWM": target_pwm,
+        "solenoidDuration": pulse_duration
     })
 
 @app.route('/cmd/stop', methods=['GET', 'POST'])
@@ -339,7 +367,7 @@ def cmd_stop():
     try:
         set_solenoid(False)
     except Exception as e:
-        pass  # Still try to send safe mode even if GPIO fails
+        print(f"[GPIO] set_solenoid(False) failed: {e}")
 
     # Deactivate Code Cell over BLE (best-effort)
     try:
@@ -370,7 +398,9 @@ def status():
     return jsonify(system_state)
 
 
+
 if __name__ == '__main__':
+    _init_solenoid()
     print("=" * 40)
     print("Plasma Brake Controller starting...")
     print(f"Serial port: {SERIAL_PORT} @ {BAUD_RATE} baud")
