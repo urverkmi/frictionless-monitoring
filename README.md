@@ -1,6 +1,8 @@
-# Aurora Propulsion Plasma Brake Test Rig Monitor
+# Frictionless: A Plasma Brake Test Rig
 
-Real-time monitoring system for plasma brake test rig end mass tracking.
+A real-time monitoring system for our plasma brake deployment test rig. 
+
+Designed for Aalto University's [PdP 25-26](https://pdp.fi/gala26/) by Team Friction<, sponsored by [Aurora Propulsions Technologies](https://aurorapt.space/).
 
 ## Features
 - Real-time position, velocity, and acceleration tracking
@@ -43,7 +45,6 @@ Then open `http://<pi-host>:3000/game` in a browser and click **Start round**.
 See [docs/api.md](docs/api.md) for the data contract between the C++ AprilTag detector, Python backend, and GUI (UDP JSON format, coordinate frames, kinematics fields).
 
 ## Controller App
-
 The Flask backend (`src/controller/controller_app.py`) on port 5001 orchestrates the test rig:
 
 **Endpoints:**
@@ -54,10 +55,9 @@ The Flask backend (`src/controller/controller_app.py`) on port 5001 orchestrates
 | `/status` | GET | Current system state |
 
 **Start sequence flow:**
-1. PCB enters Standby mode, then Early Deployment mode (RS422 serial)
-2. ESP32 receives `PWM:<value>` and runs the spinup cycle autonomously
-3. When ESP32 releases its solenoid, it sends `DETACHED` back to the Pi
-4. Pi activates GPIO 17 (release signal) upon receiving `DETACHED`
+1. ESP32 receives `PWM:<value>` and runs the spinup cycle autonomously
+2. When ESP32 releases its solenoid, it sends `DETACHED` back to the Pi
+3. Pi activates GPIO 17 (release signal) upon receiving `DETACHED`
 
 **Hardware interfaces:**
 - **PCB**: RS422 binary protocol over `/dev/ttyUSB0` (see IDD rev 5.0)
@@ -91,9 +91,8 @@ Text-based, newline-terminated protocol at 115200 baud.
 
 Default target PWM is 200 if no value is specified from the GUI.
 
-**Wiring options:**
-- **USB cable**: ESP32-C6 USB port to Pi USB port. Pi sees `/dev/ttyACM0`.
-- **UART wires** (3 wires): Pi GPIO14 (TX) to ESP32 RX, Pi GPIO15 (RX) to ESP32 TX, common GND. Both 3.3V — no level shifter needed.
+**Wiring:**
+ESP32-C6 USB port to Pi USB port. Pi sees `/dev/ttyACM0`.
 
 ## ESP32 Firmware
 The Arduino sketch is in `esp32/esp32_uart.ino`. Flash to the ESP32-C6 using the Arduino IDE or PlatformIO.
