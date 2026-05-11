@@ -61,26 +61,8 @@ When `./start.sh` runs it will, in order:
 6. Start the C++ AprilTag vision binary (`vision/build/apriltag_demo`).
 7. Start the React GUI on **port 3000**.
 
-Once the banner `Aurora Plasma Brake Monitor — RUNNING` appears, open the
-GUI in a browser:
-
-- On the Pi itself: <http://localhost:3000>
-- From another machine on the same network: `http://<pi-host>:3000`
-
-Press **Ctrl + C** in the terminal running `./start.sh` to shut everything
-down cleanly.
-
 Live logs are written to `logs/` (`flask.log`, `bridge.log`, `vision.log`,
 `react.log`, and `simulator.log` / `esp32_sim.log` in sim mode).
-
-### GUI-only / frontend development
-
-If you are working on the React UI and the backend is already running, you can
-restart just the GUI:
-
-```bash
-cd gui && npm start
-```
 
 ## Extrinsic Calibration
 
