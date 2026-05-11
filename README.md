@@ -20,8 +20,6 @@ Designed for Aalto University's [PdP 25-26](https://pdp.fi/gala26/) by Team Fric
 
 All AprilTags use the **tag36h11** family.
 
----
-
 ## First-Time Setup
 
 Clone the repository onto the Pi, then:
@@ -108,7 +106,8 @@ HQ Camera at 2028×1520. If you change `resolution_divider` or swap the
 camera/lens, redo intrinsic calibration — see `vision/README.md` and
 `src/camera/calib_intrinsics.py`.
 
----
+## Vision Data Pipeline
+See [docs/api.md](docs/api.md) for the data contract between the C++ AprilTag detector, Python backend, and GUI (UDP JSON format, coordinate frames, kinematics fields).
 
 ## De-orbit Snoopy!
 
@@ -124,8 +123,6 @@ Then open `http://<pi-host>:3000/game` in a browser and click **Start round**.
 
 **Tuning:** all game parameters (table bounds, target size, round duration, scoring threshold) live in [`gui/src/gameConfig.js`](gui/src/gameConfig.js) with inline comments — edit and reload the GUI.
 
-## Vision Data Pipeline
-See [docs/api.md](docs/api.md) for the data contract between the C++ AprilTag detector, Python backend, and GUI (UDP JSON format, coordinate frames, kinematics fields).
 
 ## Controller App
 The Flask backend (`src/controller/controller_app.py`) on port 5001 orchestrates the test rig:
